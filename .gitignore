@@ -1,0 +1,10 @@
+/build/
+/out/results.csv
+*.exe
+*.obj
+*.lib
+*.pdb
+*.ilk
+*.vcxproj*
+CMakeFiles/
+CMakeCache.txt

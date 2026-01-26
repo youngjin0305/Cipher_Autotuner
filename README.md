@@ -1,4 +1,10 @@
 # Cipher_Autotuner
+빌드 후 실행
+```
+> cmake -S . -B build
+> cmake --build build --config Release
+> .\build\Release\bench_runner.exe
+```
 
 - 프로젝트 임시 구조
 ```

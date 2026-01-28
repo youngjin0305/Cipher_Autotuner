@@ -28,6 +28,7 @@ target_link_libraries(aria_dispatch PUBLIC aria_ref)
 
 add_executable(bench_runner
   bench/runner/main.c
+  bench/runner/bench_measure.c
 )
 target_include_directories(bench_runner PRIVATE
   common/include
@@ -39,4 +40,3 @@ target_link_libraries(bench_runner PRIVATE common aria_dispatch aria_ref)
 set_target_properties(bench_runner PROPERTIES
   VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
-

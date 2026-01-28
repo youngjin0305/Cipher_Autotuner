@@ -1,4 +1,4 @@
-#include "common_time.h"
+#include "bench_measure.h"
 #include "runtime_dispatch.h"
 
 #include <stdint.h>
@@ -8,6 +8,7 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -27,8 +28,11 @@ int main(void) {
   };
   const size_t lengths_count = sizeof(lengths) / sizeof(lengths[0]);
   const size_t warmup = 200;
-  const size_t repeats = 2000;
+  const size_t outer = 21;
+  const size_t inner_max = (size_t)(1u << 20);
   const size_t buffer_size = 1024 * 1024;
+  const stat_mode_t stat_mode = STAT_MEDIAN;
+  uint64_t target_ticks = 0;
 
   uint8_t *input = (uint8_t *)malloc(buffer_size);
   uint8_t *output = (uint8_t *)malloc(buffer_size);
@@ -51,6 +55,16 @@ int main(void) {
     return 1;
   }
 
+#if defined(_WIN32)
+  {
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    target_ticks = (uint64_t)((freq.QuadPart * 10) / 1000);
+  }
+#else
+  target_ticks = 0;
+#endif
+
   ensure_out_dir();
 
   FILE *csv = fopen("out/results.csv", "w");
@@ -61,40 +75,43 @@ int main(void) {
     return 1;
   }
 
-  fprintf(csv, "len,impl,warmup,repeats,cycles,cycles_per_byte\n");
+  fprintf(csv, "len,impl,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,ns_per_byte,ns_per_byte_corrected,stat_mode,sink\n");
+
+  uint64_t final_sink = 0;
 
   for (size_t i = 0; i < lengths_count; ++i) {
     const size_t len = lengths[i];
-    uint64_t best_cycles = UINT64_MAX;
+    bench_result_t result = bench_run(impl->encrypt,
+                                      NULL,
+                                      input,
+                                      output,
+                                      len,
+                                      outer,
+                                      target_ticks,
+                                      inner_max,
+                                      stat_mode,
+                                      warmup);
+    final_sink ^= result.sink;
 
-    for (size_t w = 0; w < warmup; ++w) {
-      impl->encrypt(NULL, input, output, len);
-    }
-
-    for (size_t r = 0; r < repeats; ++r) {
-      uint64_t start = time_begin();
-      impl->encrypt(NULL, input, output, len);
-      uint64_t cycles = time_end(start);
-      if (cycles < best_cycles) {
-        best_cycles = cycles;
-      }
-    }
-
-    double cycles_per_byte = 0.0;
-    if (len > 0) {
-      cycles_per_byte = (double)best_cycles / (double)len;
-    }
-
-    fprintf(csv, "%zu,%s,%zu,%zu,%llu,%.6f\n",
+    fprintf(csv, "%zu,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu\n",
             len,
             impl->name,
-            warmup,
-            repeats,
-            (unsigned long long)best_cycles,
-            cycles_per_byte);
+            result.outer,
+            result.inner,
+            (unsigned long long)result.total_ticks,
+            (unsigned long long)result.empty_ticks,
+            (unsigned long long)result.corrected_ticks,
+            (unsigned long long)result.qpc_freq,
+            result.ns_total,
+            result.ns_per_call,
+            result.ns_per_byte,
+            result.ns_per_byte_corrected,
+            bench_stat_mode_name(result.stat_mode),
+            (unsigned long long)result.sink);
   }
 
   fclose(csv);
+  printf("sink=%llu\n", (unsigned long long)final_sink);
   free(input);
   free(output);
   return 0;

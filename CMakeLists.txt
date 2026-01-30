@@ -15,6 +15,13 @@ add_library(aria_ref STATIC
 target_include_directories(aria_ref PUBLIC
   block_ciphers/aria/api
 )
+target_include_directories(aria_ref PRIVATE
+    ${CMAKE_SOURCE_DIR}/block_ciphers/aria/source/ref
+)
+target_sources(aria_ref PRIVATE
+    ${CMAKE_SOURCE_DIR}/block_ciphers/aria/source/ref/aria_ref_core.c
+)
+
 
 add_library(aria_dispatch STATIC
   block_ciphers/aria/dispatch/runtime_dispatch.c

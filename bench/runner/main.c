@@ -1,5 +1,6 @@
 #include "bench_measure.h"
 #include "runtime_dispatch.h"
+#include "aria_api.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -55,6 +56,13 @@ int main(void) {
     return 1;
   }
 
+  aria_ctx_t ctx;
+  uint8_t key[32] = {0};
+  const int keybits = 128;
+  aria_init(&ctx, key, keybits);
+
+  printf("[DEBUG] aria_init: keybits=%d rounds=%d\n", ctx.keybits, ctx.rounds);
+
 #if defined(_WIN32)
   {
     LARGE_INTEGER freq;
@@ -82,7 +90,7 @@ int main(void) {
   for (size_t i = 0; i < lengths_count; ++i) {
     const size_t len = lengths[i];
     bench_result_t result = bench_run(impl->encrypt,
-                                      NULL,
+                                      &ctx,
                                       input,
                                       output,
                                       len,

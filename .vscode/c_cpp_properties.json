@@ -4,7 +4,8 @@
             "name": "Win32",
             "includePath": [
                 "${workspaceFolder}/**",
-                "${workspaceFolder}/block_ciphers/aria/api"
+                "${workspaceFolder}/block_ciphers/aria/api",
+                "${workspaceFolder}/block_ciphers/aria/source/ref"
             ],
             "defines": [
                 "_DEBUG",

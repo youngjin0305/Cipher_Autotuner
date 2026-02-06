@@ -26,6 +26,8 @@ typedef struct bench_result {
   uint64_t qpc_freq;
   double ns_total;
   double ns_per_call;
+  double ns_per_byte;
+  double ns_per_byte_corrected;
   double ticks_per_call;
   double ticks_per_byte;
   stat_mode_t stat_mode;

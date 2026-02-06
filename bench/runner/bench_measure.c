@@ -353,10 +353,14 @@ bench_result_t bench_run(aria_encrypt_fn fn,
     result.ns_total = (total_stat * 1e9) / (double)result.qpc_freq;
     if (result.inner > 0) {
       result.ns_per_call = result.ns_total / (double)result.inner;
+      if (len > 0) {
+      result.ns_per_byte = result.ns_total / ((double)result.inner * (double)len);
+    }
     }
 
     if (diff_stat > 0.0 && result.inner > 0 && len > 0) {
       double corrected_ns_total = (diff_stat * 1e9) / (double)result.qpc_freq;
+      result.ns_per_byte_corrected = corrected_ns_total / ((double)result.inner * (double)len);
     }
   }
   return result;

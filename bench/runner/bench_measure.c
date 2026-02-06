@@ -296,8 +296,6 @@ bench_result_t bench_run(aria_encrypt_fn fn,
   result.qpc_freq = 0;
   result.ns_total = 0.0;
   result.ns_per_call = 0.0;
-  result.ns_per_byte = 0.0;
-  result.ns_per_byte_corrected = 0.0;
   result.ticks_per_call = 0.0;
   result.ticks_per_byte = 0.0;
   result.stat_mode = mode;
@@ -311,55 +309,54 @@ bench_result_t bench_run(aria_encrypt_fn fn,
     fn(ctx, in, out, len);
   }
 
-  uint64_t *samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  uint64_t *total_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
   uint64_t *empty_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  if (!samples || !empty_samples) {
-    free(samples);
+  uint64_t *diff_samples  = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  if (!total_samples || !empty_samples || !diff_samples) {
+    free(total_samples);
     free(empty_samples);
+    free(diff_samples);
     return result;
   }
 
   result.inner = pick_inner(fn, ctx, in, out, len, target_ticks, inner_max, &result.sink);
 
   for (size_t i = 0; i < outer; ++i) {
-    samples[i] = measure_once(fn, ctx, in, out, len, result.inner, &result.sink);
+    uint64_t t = measure_once(fn, ctx, in, out, len, result.inner, &result.sink);
+    uint64_t e = measure_once(empty_encrypt, ctx, in, out, len, result.inner, &result.sink);
+    total_samples[i] = t;
+    empty_samples[i] = e;
+    diff_samples[i]  = (t > e) ? (t - e) : 0;
   }
 
-  // Stats computed on total and empty separately; corrected derived from their difference.
-  double ticks_stat = stat_ticks(samples, outer, mode);
-  for (size_t i = 0; i < outer; ++i) {
-    empty_samples[i] = measure_once(empty_encrypt, ctx, in, out, len, result.inner, &result.sink);
-  }
+  double total_stat = stat_ticks(total_samples, outer, mode);
   double empty_stat = stat_ticks(empty_samples, outer, mode);
-  free(samples);
-  free(empty_samples);
+  double diff_stat  = stat_ticks(diff_samples,  outer, mode);
 
-  result.total_ticks = (uint64_t)(ticks_stat + 0.5);
+  free(total_samples);
+  free(empty_samples);
+  free(diff_samples);
+
+  result.total_ticks = (uint64_t)(total_stat + 0.5);
   result.empty_ticks = (uint64_t)(empty_stat + 0.5);
-  if (ticks_stat > empty_stat) {
-    result.corrected_ticks = (uint64_t)(ticks_stat - empty_stat + 0.5);
-  } else {
-    result.corrected_ticks = 0;
-  }
+  result.corrected_ticks = (uint64_t)(diff_stat + 0.5);
+
   if (result.inner > 0) {
-    result.ticks_per_call = ticks_stat / (double)result.inner;
+    result.ticks_per_call = total_stat / (double)result.inner;
     if (len > 0) {
-      result.ticks_per_byte = ticks_stat / ((double)result.inner * (double)len);
+      result.ticks_per_byte = total_stat / ((double)result.inner * (double)len);
     }
   }
 
   result.qpc_freq = qpc_freq();
   if (result.qpc_freq > 0) {
-    result.ns_total = (ticks_stat * 1e9) / (double)result.qpc_freq;
+    result.ns_total = (total_stat * 1e9) / (double)result.qpc_freq;
     if (result.inner > 0) {
       result.ns_per_call = result.ns_total / (double)result.inner;
-      if (len > 0) {
-        result.ns_per_byte = result.ns_total / ((double)result.inner * (double)len);
-      }
     }
-    if (result.corrected_ticks > 0 && result.inner > 0 && len > 0) {
-      double corrected_ns_total = ((double)result.corrected_ticks * 1e9) / (double)result.qpc_freq;
-      result.ns_per_byte_corrected = corrected_ns_total / ((double)result.inner * (double)len);
+
+    if (diff_stat > 0.0 && result.inner > 0 && len > 0) {
+      double corrected_ns_total = (diff_stat * 1e9) / (double)result.qpc_freq;
     }
   }
   return result;
@@ -384,8 +381,6 @@ bench_result_t bench_run_keysetup(aria_keysetup_fn fn,
   result.qpc_freq = 0;
   result.ns_total = 0.0;
   result.ns_per_call = 0.0;
-  result.ns_per_byte = 0.0;
-  result.ns_per_byte_corrected = 0.0;
   result.ticks_per_call = 0.0;
   result.ticks_per_byte = 0.0;
   result.stat_mode = mode;
@@ -399,43 +394,45 @@ bench_result_t bench_run_keysetup(aria_keysetup_fn fn,
     fn(ctx, key, keybits);
   }
 
-  uint64_t *samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  uint64_t *total_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
   uint64_t *empty_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  if (!samples || !empty_samples) {
-    free(samples);
+  uint64_t *diff_samples  = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  if (!total_samples || !empty_samples || !diff_samples) {
+    free(total_samples);
     free(empty_samples);
+    free(diff_samples);
     return result;
   }
 
   result.inner = pick_inner_keysetup(fn, ctx, key, keybits, target_ticks, inner_max, &result.sink);
 
   for (size_t i = 0; i < outer; ++i) {
-    samples[i] = measure_keysetup_once(fn, ctx, key, keybits, result.inner, &result.sink);
+    uint64_t t = measure_keysetup_once(fn, ctx, key, keybits, result.inner, &result.sink);
+    uint64_t e = measure_keysetup_once(empty_keysetup, ctx, key, keybits, result.inner, &result.sink);
+    total_samples[i] = t;
+    empty_samples[i] = e;
+    diff_samples[i]  = (t > e) ? (t - e) : 0;
   }
 
-  // Stats computed on total and empty separately; corrected derived from their difference.
-  double ticks_stat = stat_ticks(samples, outer, mode);
-  for (size_t i = 0; i < outer; ++i) {
-    empty_samples[i] = measure_keysetup_once(empty_keysetup, ctx, key, keybits, result.inner, &result.sink);
-  }
+  double total_stat = stat_ticks(total_samples, outer, mode);
   double empty_stat = stat_ticks(empty_samples, outer, mode);
-  free(samples);
-  free(empty_samples);
+  double diff_stat  = stat_ticks(diff_samples,  outer, mode);
 
-  result.total_ticks = (uint64_t)(ticks_stat + 0.5);
+  free(total_samples);
+  free(empty_samples);
+  free(diff_samples);
+
+  result.total_ticks = (uint64_t)(total_stat + 0.5);
   result.empty_ticks = (uint64_t)(empty_stat + 0.5);
-  if (ticks_stat > empty_stat) {
-    result.corrected_ticks = (uint64_t)(ticks_stat - empty_stat + 0.5);
-  } else {
-    result.corrected_ticks = 0;
-  }
+  result.corrected_ticks = (uint64_t)(diff_stat + 0.5);
+
   if (result.inner > 0) {
-    result.ticks_per_call = ticks_stat / (double)result.inner;
+    result.ticks_per_call = total_stat / (double)result.inner;
   }
 
   result.qpc_freq = qpc_freq();
   if (result.qpc_freq > 0) {
-    result.ns_total = (ticks_stat * 1e9) / (double)result.qpc_freq;
+    result.ns_total = (total_stat * 1e9) / (double)result.qpc_freq;
     if (result.inner > 0) {
       result.ns_per_call = result.ns_total / (double)result.inner;
     }

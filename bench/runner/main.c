@@ -101,7 +101,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  fprintf(csv, "len,impl,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,ns_per_byte,ns_per_byte_corrected,stat_mode,sink,keysetup_total_ticks,keysetup_empty_ticks,keysetup_corrected_ticks,keysetup_ns_total,keysetup_ns_per_call,scenario\n");
+  fprintf(csv, "len,impl,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,stat_mode,sink,keysetup_total_ticks,keysetup_empty_ticks,keysetup_corrected_ticks,keysetup_ns_total,keysetup_ns_per_call,scenario\n");
 
   uint64_t final_sink = 0;
   bench_result_t keysetup_result = bench_run_keysetup(aria_init,
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
                                       warmup);
     final_sink ^= result.sink;
 
-    fprintf(csv, "%zu,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu,%llu,%llu,%llu,%.6f,%.6f,%s\n",
+    fprintf(csv, "%zu,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%s,%llu,%llu,%llu,%llu,%.6f,%.6f,%s\n",
             len,
             impl->name,
             result.outer,
@@ -142,8 +142,6 @@ int main(int argc, char **argv) {
             (unsigned long long)result.qpc_freq,
             result.ns_total,
             result.ns_per_call,
-            result.ns_per_byte,
-            result.ns_per_byte_corrected,
             bench_stat_mode_name(result.stat_mode),
             (unsigned long long)result.sink,
             (unsigned long long)keysetup_result.total_ticks,

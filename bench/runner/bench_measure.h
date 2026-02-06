@@ -12,6 +12,10 @@ typedef enum stat_mode {
   STAT_TRIMMED_MEAN = 2
 } stat_mode_t;
 
+#define BENCH_TRIM_RATIO 0.10
+
+typedef void (*aria_keysetup_fn)(aria_ctx_t *ctx, const uint8_t *key, int keybits);
+
 typedef struct bench_result {
   size_t len;
   size_t inner;
@@ -42,5 +46,15 @@ bench_result_t bench_run(aria_encrypt_fn fn,
                          size_t inner_max,
                          stat_mode_t mode,
                          size_t warmup);
+
+bench_result_t bench_run_keysetup(aria_keysetup_fn fn,
+                                  aria_ctx_t *ctx,
+                                  uint8_t *key,
+                                  int keybits,
+                                  size_t outer,
+                                  uint64_t target_ticks,
+                                  size_t inner_max,
+                                  stat_mode_t mode,
+                                  size_t warmup);
 
 #endif

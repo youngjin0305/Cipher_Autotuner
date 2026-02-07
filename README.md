@@ -4,6 +4,7 @@
 > cmake -S . -B build
 > cmake --build build --config Release
 > .\build\Release\bench_runner.exe
+> .\build\Release\aria_kat.exe 
 ```
 
 - 프로젝트 임시 구조

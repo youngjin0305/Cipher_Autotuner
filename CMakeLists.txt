@@ -22,6 +22,9 @@ target_sources(aria_ref PRIVATE
     ${CMAKE_SOURCE_DIR}/block_ciphers/aria/source/ref/aria_ref_core.c
 )
 
+add_executable(aria_kat block_ciphers/aria/tests/test_aria_kat.c)
+target_link_libraries(aria_kat PRIVATE aria_ref)
+
 
 add_library(aria_dispatch STATIC
   block_ciphers/aria/dispatch/runtime_dispatch.c

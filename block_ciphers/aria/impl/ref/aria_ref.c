@@ -38,7 +38,4 @@ static void aria_ref_encrypt(const aria_ctx_t *ctx, const uint8_t *in, uint8_t *
   }
 }
 
-const aria_impl_t aria_ref_impl = {
-  "ref",
-  aria_ref_encrypt,
-};
+const aria_impl_t aria_ref_impl = { "ref", aria_ref_encrypt };

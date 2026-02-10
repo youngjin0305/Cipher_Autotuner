@@ -70,11 +70,12 @@ static int is_placeholder(const char *s) {
   return strcmp(s, "PLACEHOLDER") == 0;
 }
 
-static int run_ecb_kat(const char *name,
-                       const char *key_hex,
-                       const char *pt_hex,
-                       const char *ct_hex,
-                       int keybits) {
+static int run_ecb_kat(const aria_impl_t *impl, const char *name, const char *key_hex, const char *pt_hex, const char *ct_hex, int keybits) {
+  if (!impl || !impl->encrypt) {
+    printf("[FAIL] %s (impl null)\n", name);
+    return -1;
+  }
+  
   if (is_placeholder(key_hex) || is_placeholder(pt_hex) || is_placeholder(ct_hex)) {
     printf("Fill KAT vectors in test_aria_kat.c\n");
     printf("[FAIL] %s\n", name);
@@ -90,7 +91,7 @@ static int run_ecb_kat(const char *name,
   if (hex2bytes(key_hex, key, key_len) != 0 ||
       hex2bytes(pt_hex, pt, 16) != 0 ||
       hex2bytes(ct_hex, ct_exp, 16) != 0) {
-    printf("[FAIL] %s\n", name);
+    printf("[FAIL] %s \n", name);
     printf("  hex parse fail\n");
     return -1;
   }
@@ -98,7 +99,8 @@ static int run_ecb_kat(const char *name,
   aria_ctx_t ctx;
   memset(&ctx, 0, sizeof(ctx));
   aria_init(&ctx, key, keybits);
-  aria_ref_impl.encrypt(&ctx, pt, ct_got, 16);
+
+  impl->encrypt(&ctx, pt, ct_got, 16);
 
   if (!bytes_eq(ct_got, ct_exp, 16)) {
     printf("[FAIL] %s\n", name);
@@ -111,31 +113,45 @@ static int run_ecb_kat(const char *name,
   return 0;
 }
 
-static int test_ecb_128_one(void) {
+static int test_ecb_128_one(const aria_impl_t *impl) {
   const char *key_hex = "00112233445566778899aabbccddeeff";
   const char *pt_hex = "11111111aaaaaaaa11111111bbbbbbbb";
   const char *ct_hex = "c6ecd08e22c30abdb215cf74e2075e6e";
-  return run_ecb_kat("ECB-128", key_hex, pt_hex, ct_hex, 128);
+
+  char name[64];
+  snprintf(name, sizeof(name), "ECB-128 (%s)", impl->name);
+  return run_ecb_kat(impl, name, key_hex, pt_hex, ct_hex, 128);
 }
 
-static int test_ecb_192_one(void) {
+static int test_ecb_192_one(const aria_impl_t *impl) {
   const char *key_hex = "00112233445566778899aabbccddeeff0011223344556677";
   const char *pt_hex = "11111111aaaaaaaa11111111bbbbbbbb";
   const char *ct_hex = "8d1470625f59ebacb0e55b534b3e462b";
-  return run_ecb_kat("ECB-192", key_hex, pt_hex, ct_hex, 192);
+  
+  char name[64];
+  snprintf(name, sizeof(name), "ECB-192 (%s)", impl->name);
+  return run_ecb_kat(impl, name, key_hex, pt_hex, ct_hex, 192);
 }
 
-static int test_ecb_256_one(void) {
+static int test_ecb_256_one(const aria_impl_t *impl) {
   const char *key_hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
   const char *pt_hex = "11111111aaaaaaaa11111111bbbbbbbb";
   const char *ct_hex = "58a875e6044ad7fffa4f58420f7f442d";
-  return run_ecb_kat("ECB-256", key_hex, pt_hex, ct_hex, 256);
+  
+  char name[64];
+  snprintf(name, sizeof(name), "ECB-256 (%s)", impl->name);
+  return run_ecb_kat(impl, name, key_hex, pt_hex, ct_hex, 256);
 }
 
 int main(void) {
   int rc = 0;
-  rc |= test_ecb_128_one();
-  rc |= test_ecb_192_one();
-  rc |= test_ecb_256_one();
+
+  const aria_impl_t *impls[] = { &aria_ref_impl, &aria_avx2_impl };
+  for (size_t i = 0; i < sizeof(impls) / sizeof(impls[0]); i++) {
+    rc |= test_ecb_128_one(impls[i]);
+    rc |= test_ecb_192_one(impls[i]);
+    rc |= test_ecb_256_one(impls[i]);
+  }
+
   return rc ? 1 : 0;
 }

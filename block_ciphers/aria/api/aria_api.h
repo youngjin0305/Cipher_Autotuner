@@ -20,5 +20,6 @@ typedef struct aria_impl {
 void aria_init(aria_ctx_t *ctx, const uint8_t *key, int keybits);
 
 extern const aria_impl_t aria_ref_impl;
+extern const aria_impl_t aria_avx2_impl;
 
 #endif

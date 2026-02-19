@@ -1,2 +1,2 @@
-keybits,impl,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,stat_mode,sink,scenario
-128,ref,21,32768,186470,1419,185049,10000000,18647029.411765,569.062177,trimmed_mean,10396383079285726869,server
+keybits,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,stat_mode,sink,scenario
+128,21,16384,95023,693,94330,10000000,9502252.941176,579.971493,trimmed_mean,10396383079285726869,server

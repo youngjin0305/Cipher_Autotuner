@@ -64,22 +64,19 @@ int main(int argc, char **argv) {
     input[i] = (uint8_t)(i & 0xFFu);
   }
 
-  const aria_impl_t *impl = aria_runtime_dispatch_scenario(0, scenario);
-  if (!impl || !impl->encrypt) {
-    fprintf(stderr, "No ARIA implementation available.\n");
-    free(input);
-    free(output);
-    return 1;
-  }
+  // const aria_impl_t *impl = aria_runtime_dispatch_scenario(0, scenario);
+  // if (!impl || !impl->encrypt) {
+  //   fprintf(stderr, "No ARIA implementation available.\n");
+  //   free(input);
+  //   free(output);
+  //   return 1;
+  // }
+  // printf("[INFO] scenario=%s selected_impl=%s\n", aria_scenario_name(scenario), impl->name);
 
   aria_ctx_t ctx;
   uint8_t key[32] = {0};
   const int keybits = 128;
   aria_init(&ctx, key, keybits);
-
-  printf("[INFO] scenario=%s selected_impl=%s\n",
-         aria_scenario_name(scenario),
-         impl->name);
 
 #if defined(_WIN32)
   {
@@ -110,23 +107,22 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  fprintf(key_csv, "keybits,impl,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,stat_mode,sink,scenario\n");
+  fprintf(key_csv, "keybits,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,stat_mode,sink,scenario\n");
   fprintf(csv, "len,impl,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,ns_per_byte,ns_per_byte_corrected,stat_mode,sink,scenario\n");
 
+  const aria_impl_t *impls[] = { &aria_ref_impl, &aria_avx2_impl };
+  const size_t impls_count = sizeof(impls) / sizeof(impls[0]);
+
+  printf("[INFO] scenario=%s\n", aria_scenario_name(scenario));
+  for (size_t k = 0; k < impls_count; ++k) {
+    printf("[INFO] will_measure_impl=%s\n", impls[k]->name);
+  }
+  
   uint64_t final_sink = 0;
-  bench_result_t keysetup_result = bench_run_keysetup(aria_init,
-                                                      &ctx,
-                                                      key,
-                                                      keybits,
-                                                      outer,
-                                                      target_ticks,
-                                                      inner_max,
-                                                      stat_mode,
-                                                      warmup);
+  bench_result_t keysetup_result = bench_run_keysetup(aria_init, &ctx, key, keybits, outer, target_ticks, inner_max, stat_mode, warmup);
   final_sink ^= keysetup_result.sink;
-  fprintf(key_csv, "%d,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%s,%llu,%s\n",
+  fprintf(key_csv, "%d,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%s,%llu,%s\n",
           keybits,
-          impl->name,
           keysetup_result.outer,
           keysetup_result.inner,
           (unsigned long long)keysetup_result.total_ticks,
@@ -140,37 +136,32 @@ int main(int argc, char **argv) {
           aria_scenario_name(scenario));
   memset(key, 0, sizeof(key));
   aria_init(&ctx, key, keybits);
+    
+  for (size_t k = 0; k < impls_count; ++k) {
+    const aria_impl_t *impl = impls[k];
 
-  for (size_t i = 0; i < lengths_count; ++i) {
-    const size_t len = lengths[i];
-    bench_result_t result = bench_run(impl->encrypt,
-                                      &ctx,
-                                      input,
-                                      output,
-                                      len,
-                                      outer,
-                                      target_ticks,
-                                      inner_max,
-                                      stat_mode,
-                                      warmup);
-    final_sink ^= result.sink;
+    for (size_t i = 0; i < lengths_count; ++i) {
+      const size_t len = lengths[i];
+      bench_result_t result = bench_run(impl->encrypt, &ctx, input, output, len, outer, target_ticks, inner_max, stat_mode, warmup);
+      final_sink ^= result.sink;
 
-    fprintf(csv, "%zu,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu,%s\n",
-            len,
-            impl->name,
-            result.outer,
-            result.inner,
-            (unsigned long long)result.total_ticks,
-            (unsigned long long)result.empty_ticks,
-            (unsigned long long)result.corrected_ticks,
-            (unsigned long long)result.qpc_freq,
-            result.ns_total,
-            result.ns_per_call,
-            result.ns_per_byte,
-            result.ns_per_byte_corrected,
-            bench_stat_mode_name(result.stat_mode),
-            (unsigned long long)result.sink,
+      fprintf(csv, "%zu,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu,%s\n",
+              len,
+              impl->name,
+              result.outer,
+              result.inner,
+              (unsigned long long)result.total_ticks,
+              (unsigned long long)result.empty_ticks,
+              (unsigned long long)result.corrected_ticks,
+              (unsigned long long)result.qpc_freq,
+              result.ns_total,
+              result.ns_per_call,
+              result.ns_per_byte,
+              result.ns_per_byte_corrected,
+              bench_stat_mode_name(result.stat_mode),
+              (unsigned long long)result.sink,
             aria_scenario_name(scenario));
+    }
   }
 
   fclose(key_csv);

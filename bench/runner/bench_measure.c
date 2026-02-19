@@ -43,23 +43,14 @@ static void empty_keysetup(aria_ctx_t *ctx, const uint8_t *key, int keybits) {
   (void)keybits;
 }
 
-static void empty_encrypt(const aria_ctx_t *ctx,
-                          const uint8_t *in,
-                          uint8_t *out,
-                          size_t len) {
+static void empty_encrypt(const aria_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t len) {
   (void)ctx;
   (void)in;
   (void)out;
   (void)len;
 }
 
-static uint64_t measure_once(aria_encrypt_fn fn,
-                             const aria_ctx_t *ctx,
-                             const uint8_t *in,
-                             uint8_t *out,
-                             size_t len,
-                             size_t inner,
-                             uint64_t *sink) {
+static uint64_t measure_once(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t len, size_t inner, uint64_t *sink) {
   uint64_t local_sink = *sink;
   uint64_t start = qpc_now();
 
@@ -84,12 +75,7 @@ static uint64_t measure_once(aria_encrypt_fn fn,
   return end - start;
 }
 
-static uint64_t measure_keysetup_once(aria_keysetup_fn fn,
-                                      aria_ctx_t *ctx,
-                                      uint8_t *key,
-                                      int keybits,
-                                      size_t inner,
-                                      uint64_t *sink) {
+static uint64_t measure_keysetup_once(aria_keysetup_fn fn, aria_ctx_t *ctx, uint8_t *key, int keybits, size_t inner, uint64_t *sink) {
   uint64_t local_sink = *sink;
   size_t key_bytes = (size_t)keybits / 8;
   if (key_bytes == 0) {
@@ -111,14 +97,7 @@ static uint64_t measure_keysetup_once(aria_keysetup_fn fn,
   return end - start;
 }
 
-static size_t pick_inner(aria_encrypt_fn fn,
-                         const aria_ctx_t *ctx,
-                         const uint8_t *in,
-                         uint8_t *out,
-                         size_t len,
-                         uint64_t target_ticks,
-                         size_t inner_max,
-                         uint64_t *sink) {
+static size_t pick_inner(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t len, uint64_t target_ticks, size_t inner_max, uint64_t *sink) {
   size_t inner = 1;
   unsigned int zero_hits = 0;
   if (target_ticks == 0) {
@@ -155,13 +134,7 @@ static size_t pick_inner(aria_encrypt_fn fn,
   }
 }
 
-static size_t pick_inner_keysetup(aria_keysetup_fn fn,
-                                  aria_ctx_t *ctx,
-                                  uint8_t *key,
-                                  int keybits,
-                                  uint64_t target_ticks,
-                                  size_t inner_max,
-                                  uint64_t *sink) {
+static size_t pick_inner_keysetup(aria_keysetup_fn fn, aria_ctx_t *ctx, uint8_t *key, int keybits, uint64_t target_ticks, size_t inner_max, uint64_t *sink) {
   size_t inner = 1;
   unsigned int zero_hits = 0;
   if (target_ticks == 0) {
@@ -210,9 +183,7 @@ static int cmp_u64(const void *a, const void *b) {
   return 0;
 }
 
-static double stat_ticks(const uint64_t *samples,
-                         size_t count,
-                         stat_mode_t mode) {
+static double stat_ticks(const uint64_t *samples, size_t count, stat_mode_t mode) {
   if (count == 0) {
     return 0.0;
   }
@@ -276,16 +247,8 @@ const char *bench_stat_mode_name(stat_mode_t mode) {
   }
 }
 
-bench_result_t bench_run(aria_encrypt_fn fn,
-                         const aria_ctx_t *ctx,
-                         const uint8_t *in,
-                         uint8_t *out,
-                         size_t len,
-                         size_t outer,
-                         uint64_t target_ticks,
-                         size_t inner_max,
-                         stat_mode_t mode,
-                         size_t warmup) {
+bench_result_t bench_run(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t len,
+                         size_t outer, uint64_t target_ticks, size_t inner_max, stat_mode_t mode, size_t warmup) {
   bench_result_t result;
   result.len = len;
   result.inner = 1;
@@ -366,15 +329,8 @@ bench_result_t bench_run(aria_encrypt_fn fn,
   return result;
 }
 
-bench_result_t bench_run_keysetup(aria_keysetup_fn fn,
-                                  aria_ctx_t *ctx,
-                                  uint8_t *key,
-                                  int keybits,
-                                  size_t outer,
-                                  uint64_t target_ticks,
-                                  size_t inner_max,
-                                  stat_mode_t mode,
-                                  size_t warmup) {
+bench_result_t bench_run_keysetup(aria_keysetup_fn fn, aria_ctx_t *ctx, uint8_t *key, int keybits, size_t outer, uint64_t target_ticks,
+                                  size_t inner_max, stat_mode_t mode, size_t warmup) {
   bench_result_t result;
   result.len = 0;
   result.inner = 1;

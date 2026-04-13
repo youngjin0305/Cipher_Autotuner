@@ -29,7 +29,7 @@ static uint64_t qpc_freq(void) {
   }
   return freq;
 #else
-  return 0;
+  return time_frequency();
 #endif
 }
 
@@ -87,7 +87,7 @@ static uint64_t measure_keysetup_once(aria_keysetup_fn fn, aria_ctx_t *ctx, uint
     size_t pos = i % key_bytes;
     key[pos] ^= (uint8_t)(i + 1);
     fn(ctx, key, keybits);
-    local_sink ^= (uint64_t)ctx->rk[0];
+    local_sink ^= (uint64_t)ctx->ref_rk[0];
     local_sink = rotl64(local_sink, 7);
     local_sink ^= (uint64_t)ctx->rounds;
   }

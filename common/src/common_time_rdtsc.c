@@ -1,5 +1,36 @@
 #include "common_time.h"
 
+#if defined(__linux__) || defined(__APPLE__)
+#include <time.h>
+
+static uint64_t monotonic_now_ns(void) {
+  struct timespec ts;
+#if defined(__linux__) && defined(CLOCK_MONOTONIC_RAW)
+  const clockid_t clock_id = CLOCK_MONOTONIC_RAW;
+#else
+  const clockid_t clock_id = CLOCK_MONOTONIC;
+#endif
+
+  if (clock_gettime(clock_id, &ts) != 0) {
+    return 0;
+  }
+
+  return ((uint64_t)ts.tv_sec * 1000000000ull) + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t time_begin(void) {
+  return monotonic_now_ns();
+}
+
+uint64_t time_end(uint64_t start) {
+  uint64_t end = monotonic_now_ns();
+  return (end > start) ? (end - start) : 0;
+}
+
+uint64_t time_frequency(void) {
+  return 1000000000ull;
+}
+#else
 #if defined(_MSC_VER)
 #include <intrin.h>
 #pragma intrinsic(__rdtsc)
@@ -26,3 +57,8 @@ uint64_t time_end(uint64_t start) {
   uint64_t end = rdtsc_now();
   return end - start;
 }
+
+uint64_t time_frequency(void) {
+  return 0;
+}
+#endif

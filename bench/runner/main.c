@@ -12,6 +12,7 @@
 #include <direct.h>
 #include <windows.h>
 #else
+#include "common_time.h"
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
@@ -114,23 +115,17 @@ static void make_timestamp(char *buffer, size_t buffer_size) {
   strftime(buffer, buffer_size, "%Y-%m-%dT%H:%M:%S", &tm_info);
 }
 
-static const char *effective_path_for(const char *impl_name, size_t len) {
-  if (!impl_name) {
+static const char *effective_path_for(const aria_impl_t *impl, size_t len) {
+  if (!impl) {
     return "unknown";
   }
-  if (strcmp(impl_name, "ref") == 0) {
-    return "ref";
+  if (impl->effective_path) {
+    return impl->effective_path(len);
   }
-  if (strcmp(impl_name, "avx2") == 0) {
-    if (len < 64) {
-      return "ref_fallback";
-    }
-    if ((len % 64) == 0) {
-      return "avx2_4way";
-    }
-    return "avx2_4way_plus_ref_tail";
+  if (impl->name) {
+    return impl->name;
   }
-  return impl_name;
+  return "unknown";
 }
 
 static double percentile_from_sorted(const double *sorted, size_t count, double pct) {
@@ -414,7 +409,7 @@ int main(int argc, char **argv) {
   aria_ctx_t ctx;
   uint8_t key[32] = {0};
   const int keybits = 128;
-  aria_init(&ctx, key, keybits);
+  aria_ref_impl.init(&ctx, key, keybits);
 
 #if defined(_WIN32)
   {
@@ -423,7 +418,10 @@ int main(int argc, char **argv) {
     target_ticks = (uint64_t)((freq.QuadPart * 10) / 1000);
   }
 #else
-  target_ticks = 0;
+  {
+    const uint64_t freq = time_frequency();
+    target_ticks = (freq > 0) ? (uint64_t)((freq * 10) / 1000) : 0;
+  }
 #endif
 
   ensure_out_dir();
@@ -486,16 +484,24 @@ int main(int argc, char **argv) {
   fprintf(summary_csv, "run_id,len,impl,scenario,effective_path,n_samples,stat_mode,ns_per_call_mean,ns_per_call_trimmed_mean,ns_per_call_p50,ns_per_call_p95,ns_per_call_p99,ns_per_byte_mean_corrected,ns_per_byte_trimmed_mean_corrected\n");
   write_run_meta(meta_json, run_id, benchmark_timestamp, warmup, outer, scenario);
 
-  const aria_impl_t *impls[] = { &aria_ref_impl, &aria_avx2_impl };
+  const aria_impl_t *impls[] = {
+    &aria_ref_impl,
+    &aria_linux_aesni_avx_impl,
+    &aria_linux_aesni_avx2_impl
+  };
   const size_t impls_count = sizeof(impls) / sizeof(impls[0]);
 
   printf("[INFO] scenario=%s\n", aria_scenario_name(scenario));
   for (size_t k = 0; k < impls_count; ++k) {
+    if (impls[k]->is_supported && !impls[k]->is_supported()) {
+      printf("[INFO] skipping_impl=%s (unsupported)\n", impls[k]->name);
+      continue;
+    }
     printf("[INFO] will_measure_impl=%s\n", impls[k]->name);
   }
   
   uint64_t final_sink = 0;
-  bench_result_t keysetup_result = bench_run_keysetup(aria_init, &ctx, key, keybits, outer, target_ticks, inner_max, stat_mode, warmup);
+  bench_result_t keysetup_result = bench_run_keysetup(aria_ref_impl.init, &ctx, key, keybits, outer, target_ticks, inner_max, stat_mode, warmup);
   final_sink ^= keysetup_result.sink;
   fprintf(key_csv, "%d,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%s,%llu,%s\n",
           keybits,
@@ -512,14 +518,19 @@ int main(int argc, char **argv) {
           aria_scenario_name(scenario));
   bench_result_cleanup(&keysetup_result);
   memset(key, 0, sizeof(key));
-  aria_init(&ctx, key, keybits);
+  aria_ref_impl.init(&ctx, key, keybits);
     
   for (size_t k = 0; k < impls_count; ++k) {
     const aria_impl_t *impl = impls[k];
+    if (impl->is_supported && !impl->is_supported()) {
+      continue;
+    }
+
+    impl->init(&ctx, key, keybits);
 
     for (size_t i = 0; i < lengths_count; ++i) {
       const size_t len = lengths[i];
-      const char *effective_path = effective_path_for(impl->name, len);
+      const char *effective_path = effective_path_for(impl, len);
       const char *scenario_name = aria_scenario_name(scenario);
       bench_result_t result = bench_run(impl->encrypt, &ctx, input, output, len, outer, target_ticks, inner_max, stat_mode, warmup);
       summary_stats_t stats = compute_summary_stats(&result);

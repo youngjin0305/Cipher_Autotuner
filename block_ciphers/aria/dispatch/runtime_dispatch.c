@@ -3,8 +3,6 @@
 
 #include <stddef.h>
 
-extern const aria_impl_t aria_avx2_impl;
-
 const char *aria_scenario_name(scenario_t scenario) {
   switch (scenario) {
     case SCENARIO_HIGH_PERF_SERVER:
@@ -21,8 +19,12 @@ const aria_impl_t *aria_runtime_dispatch_scenario(size_t len, scenario_t scenari
     return &aria_ref_impl;
   }
 
-  if (len >= 64 && aria_cpu_has_avx2()) {
-    return &aria_avx2_impl;
+  if (len >= 512 && aria_cpu_has_aesni_avx2()) {
+    return &aria_linux_aesni_avx2_impl;
+  }
+
+  if (len >= 256 && aria_cpu_has_aesni_avx()) {
+    return &aria_linux_aesni_avx_impl;
   }
 
   return &aria_ref_impl;

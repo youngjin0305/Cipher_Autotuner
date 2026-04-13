@@ -1,8 +1,14 @@
 # Cipher_Autotuner
 빌드 후 실행
 ```
-> cmake -S . -B build
+> cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 > cmake --build build --config Release
+
+# Linux
+> ./build/aria_kat
+> ./build/bench_runner
+
+# Windows
 > .\build\Release\bench_runner.exe
 > .\build\Release\aria_kat.exe 
 ```

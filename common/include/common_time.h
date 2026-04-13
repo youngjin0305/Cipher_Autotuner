@@ -5,5 +5,6 @@
 
 uint64_t time_begin(void);
 uint64_t time_end(uint64_t start);
+uint64_t time_frequency(void);
 
 #endif

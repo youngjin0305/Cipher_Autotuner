@@ -183,6 +183,27 @@ static int cmp_u64(const void *a, const void *b) {
   return 0;
 }
 
+double bench_ticks_to_ns(uint64_t ticks, uint64_t freq) {
+  if (freq == 0) {
+    return 0.0;
+  }
+  return ((double)ticks * 1e9) / (double)freq;
+}
+
+void bench_trim_bounds(size_t count, size_t *start, size_t *end) {
+  size_t trim = (size_t)((double)count * BENCH_TRIM_RATIO);
+  if (trim * 2 >= count) {
+    trim = 0;
+  }
+
+  if (start) {
+    *start = trim;
+  }
+  if (end) {
+    *end = count - trim;
+  }
+}
+
 static double stat_ticks(const uint64_t *samples, size_t count, stat_mode_t mode) {
   if (count == 0) {
     return 0.0;
@@ -220,18 +241,29 @@ static double stat_ticks(const uint64_t *samples, size_t count, stat_mode_t mode
     return value;
   }
 
-  size_t trim = (size_t)((double)count * BENCH_TRIM_RATIO);
-  if (trim * 2 >= count) {
-    trim = 0;
-  }
-  size_t start = trim;
-  size_t end = count - trim;
+  size_t start = 0;
+  size_t end = count;
+  bench_trim_bounds(count, &start, &end);
   double sum = 0.0;
   for (size_t i = start; i < end; ++i) {
     sum += (double)sorted[i];
   }
   free(sorted);
   return sum / (double)(end - start);
+}
+
+void bench_result_cleanup(bench_result_t *result) {
+  if (!result) {
+    return;
+  }
+
+  free(result->samples.total_ticks);
+  free(result->samples.empty_ticks);
+  free(result->samples.corrected_ticks);
+  result->samples.count = 0;
+  result->samples.total_ticks = NULL;
+  result->samples.empty_ticks = NULL;
+  result->samples.corrected_ticks = NULL;
 }
 
 const char *bench_stat_mode_name(stat_mode_t mode) {
@@ -259,10 +291,16 @@ bench_result_t bench_run(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_
   result.qpc_freq = 0;
   result.ns_total = 0.0;
   result.ns_per_call = 0.0;
+  result.ns_per_byte = 0.0;
+  result.ns_per_byte_corrected = 0.0;
   result.ticks_per_call = 0.0;
   result.ticks_per_byte = 0.0;
   result.stat_mode = mode;
   result.sink = 0;
+  result.samples.count = 0;
+  result.samples.total_ticks = NULL;
+  result.samples.empty_ticks = NULL;
+  result.samples.corrected_ticks = NULL;
 
   if (!fn || !in || !out || outer == 0) {
     return result;
@@ -272,33 +310,28 @@ bench_result_t bench_run(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_
     fn(ctx, in, out, len);
   }
 
-  uint64_t *total_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  uint64_t *empty_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  uint64_t *diff_samples  = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  if (!total_samples || !empty_samples || !diff_samples) {
-    free(total_samples);
-    free(empty_samples);
-    free(diff_samples);
+  result.samples.total_ticks = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  result.samples.empty_ticks = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  result.samples.corrected_ticks = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  if (!result.samples.total_ticks || !result.samples.empty_ticks || !result.samples.corrected_ticks) {
+    bench_result_cleanup(&result);
     return result;
   }
+  result.samples.count = outer;
 
   result.inner = pick_inner(fn, ctx, in, out, len, target_ticks, inner_max, &result.sink);
 
   for (size_t i = 0; i < outer; ++i) {
     uint64_t t = measure_once(fn, ctx, in, out, len, result.inner, &result.sink);
     uint64_t e = measure_once(empty_encrypt, ctx, in, out, len, result.inner, &result.sink);
-    total_samples[i] = t;
-    empty_samples[i] = e;
-    diff_samples[i]  = (t > e) ? (t - e) : 0;
+    result.samples.total_ticks[i] = t;
+    result.samples.empty_ticks[i] = e;
+    result.samples.corrected_ticks[i] = (t > e) ? (t - e) : 0;
   }
 
-  double total_stat = stat_ticks(total_samples, outer, mode);
-  double empty_stat = stat_ticks(empty_samples, outer, mode);
-  double diff_stat  = stat_ticks(diff_samples,  outer, mode);
-
-  free(total_samples);
-  free(empty_samples);
-  free(diff_samples);
+  double total_stat = stat_ticks(result.samples.total_ticks, outer, mode);
+  double empty_stat = stat_ticks(result.samples.empty_ticks, outer, mode);
+  double diff_stat  = stat_ticks(result.samples.corrected_ticks, outer, mode);
 
   result.total_ticks = (uint64_t)(total_stat + 0.5);
   result.empty_ticks = (uint64_t)(empty_stat + 0.5);
@@ -317,8 +350,8 @@ bench_result_t bench_run(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_
     if (result.inner > 0) {
       result.ns_per_call = result.ns_total / (double)result.inner;
       if (len > 0) {
-      result.ns_per_byte = result.ns_total / ((double)result.inner * (double)len);
-    }
+        result.ns_per_byte = result.ns_total / ((double)result.inner * (double)len);
+      }
     }
 
     if (diff_stat > 0.0 && result.inner > 0 && len > 0) {
@@ -341,10 +374,16 @@ bench_result_t bench_run_keysetup(aria_keysetup_fn fn, aria_ctx_t *ctx, uint8_t 
   result.qpc_freq = 0;
   result.ns_total = 0.0;
   result.ns_per_call = 0.0;
+  result.ns_per_byte = 0.0;
+  result.ns_per_byte_corrected = 0.0;
   result.ticks_per_call = 0.0;
   result.ticks_per_byte = 0.0;
   result.stat_mode = mode;
   result.sink = 0;
+  result.samples.count = 0;
+  result.samples.total_ticks = NULL;
+  result.samples.empty_ticks = NULL;
+  result.samples.corrected_ticks = NULL;
 
   if (!fn || !ctx || !key || outer == 0) {
     return result;
@@ -354,33 +393,28 @@ bench_result_t bench_run_keysetup(aria_keysetup_fn fn, aria_ctx_t *ctx, uint8_t 
     fn(ctx, key, keybits);
   }
 
-  uint64_t *total_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  uint64_t *empty_samples = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  uint64_t *diff_samples  = (uint64_t *)malloc(sizeof(uint64_t) * outer);
-  if (!total_samples || !empty_samples || !diff_samples) {
-    free(total_samples);
-    free(empty_samples);
-    free(diff_samples);
+  result.samples.total_ticks = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  result.samples.empty_ticks = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  result.samples.corrected_ticks = (uint64_t *)malloc(sizeof(uint64_t) * outer);
+  if (!result.samples.total_ticks || !result.samples.empty_ticks || !result.samples.corrected_ticks) {
+    bench_result_cleanup(&result);
     return result;
   }
+  result.samples.count = outer;
 
   result.inner = pick_inner_keysetup(fn, ctx, key, keybits, target_ticks, inner_max, &result.sink);
 
   for (size_t i = 0; i < outer; ++i) {
     uint64_t t = measure_keysetup_once(fn, ctx, key, keybits, result.inner, &result.sink);
     uint64_t e = measure_keysetup_once(empty_keysetup, ctx, key, keybits, result.inner, &result.sink);
-    total_samples[i] = t;
-    empty_samples[i] = e;
-    diff_samples[i]  = (t > e) ? (t - e) : 0;
+    result.samples.total_ticks[i] = t;
+    result.samples.empty_ticks[i] = e;
+    result.samples.corrected_ticks[i] = (t > e) ? (t - e) : 0;
   }
 
-  double total_stat = stat_ticks(total_samples, outer, mode);
-  double empty_stat = stat_ticks(empty_samples, outer, mode);
-  double diff_stat  = stat_ticks(diff_samples,  outer, mode);
-
-  free(total_samples);
-  free(empty_samples);
-  free(diff_samples);
+  double total_stat = stat_ticks(result.samples.total_ticks, outer, mode);
+  double empty_stat = stat_ticks(result.samples.empty_ticks, outer, mode);
+  double diff_stat  = stat_ticks(result.samples.corrected_ticks, outer, mode);
 
   result.total_ticks = (uint64_t)(total_stat + 0.5);
   result.empty_ticks = (uint64_t)(empty_stat + 0.5);

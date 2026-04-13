@@ -1,5 +1,5 @@
 /build/
-/out/results.csv
+/out/
 *.exe
 *.obj
 *.lib

@@ -13,6 +13,12 @@
 > .\build\Release\aria_kat.exe 
 ```
 
+지표 시각화
+```
+> python3 scripts/plot_ns_per_byte.py --input out/summary_stats.csv --output-dir figures
+> python3 scripts/plot_best_impl.py --input out/summary_stats.csv --output-dir figures
+```
+
 - 프로젝트 임시 구조
 ```
 \

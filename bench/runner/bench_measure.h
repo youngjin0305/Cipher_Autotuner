@@ -42,10 +42,23 @@ typedef struct bench_result {
   bench_samples_t samples;
 } bench_result_t;
 
+typedef struct bench_summary_stats {
+  size_t n_samples;
+  double ns_per_call_mean;
+  double ns_per_call_trimmed_mean;
+  double ns_per_call_p50;
+  double ns_per_call_p95;
+  double ns_per_call_p99;
+  double ns_per_byte_mean_corrected;
+  double ns_per_byte_trimmed_mean_corrected;
+  double ns_per_byte_p50_corrected;
+} bench_summary_stats_t;
+
 const char *bench_stat_mode_name(stat_mode_t mode);
 double bench_ticks_to_ns(uint64_t ticks, uint64_t freq);
 void bench_trim_bounds(size_t count, size_t *start, size_t *end);
 void bench_result_cleanup(bench_result_t *result);
+bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result);
 
 bench_result_t bench_run(aria_encrypt_fn fn,
                          const aria_ctx_t *ctx,

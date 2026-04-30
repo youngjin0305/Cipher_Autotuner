@@ -1,7 +1,9 @@
 #include "bench_measure.h"
+#include "autotune.h"
 #include "runtime_dispatch.h"
 #include "aria_api.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,38 +19,106 @@
 #include <sys/types.h>
 #endif
 
-typedef struct summary_stats {
-  size_t n_samples;
-  double ns_per_call_mean;
-  double ns_per_call_trimmed_mean;
-  double ns_per_call_p50;
-  double ns_per_call_p95;
-  double ns_per_call_p99;
-  double ns_per_byte_mean_corrected;
-  double ns_per_byte_trimmed_mean_corrected;
-} summary_stats_t;
-
 #define BENCH_STRINGIFY_IMPL(x) #x
 #define BENCH_STRINGIFY(x) BENCH_STRINGIFY_IMPL(x)
 
-static void ensure_out_dir(void) {
-#if defined(_WIN32)
-  _mkdir("out");
-#else
-  mkdir("out", 0755);
-#endif
-}
+typedef enum bench_output_kind {
+  BENCH_OUTPUT_RESULTS = 0,
+  BENCH_OUTPUT_SUMMARY = 1,
+  BENCH_OUTPUT_META = 2,
+  BENCH_OUTPUT_KEYSETUP = 3,
+  BENCH_OUTPUT_RAW = 4
+} bench_output_kind_t;
 
-static int cmp_double(const void *a, const void *b) {
-  const double va = *(const double *)a;
-  const double vb = *(const double *)b;
-  if (va < vb) {
-    return -1;
-  }
-  if (va > vb) {
+static int ensure_directory_single(const char *path) {
+  if (!path || path[0] == '\0') {
     return 1;
   }
+#if defined(_WIN32)
+  if (_mkdir(path) == 0 || errno == EEXIST) {
+    return 1;
+  }
+#else
+  if (mkdir(path, 0755) == 0 || errno == EEXIST) {
+    return 1;
+  }
+#endif
   return 0;
+}
+
+static int ensure_directory_recursive(const char *path) {
+  char buffer[512];
+  size_t i;
+  size_t len;
+
+  if (!path || path[0] == '\0') {
+    return 1;
+  }
+
+  len = strlen(path);
+  if (len >= sizeof(buffer)) {
+    return 0;
+  }
+  snprintf(buffer, sizeof(buffer), "%s", path);
+
+  for (i = 1; i < len; ++i) {
+    if (buffer[i] == '/' || buffer[i] == '\\') {
+      char saved = buffer[i];
+      buffer[i] = '\0';
+      if (!ensure_directory_single(buffer)) {
+        return 0;
+      }
+      buffer[i] = saved;
+    }
+  }
+
+  return ensure_directory_single(buffer);
+}
+
+static int should_emit_benchmark_output(aria_output_level_t output_level, bench_output_kind_t kind) {
+  switch (kind) {
+    case BENCH_OUTPUT_RESULTS:
+    case BENCH_OUTPUT_SUMMARY:
+    case BENCH_OUTPUT_META:
+      return 1;
+    case BENCH_OUTPUT_KEYSETUP:
+      return output_level >= ARIA_OUTPUT_LEVEL_DEBUG;
+    case BENCH_OUTPUT_RAW:
+      return output_level >= ARIA_OUTPUT_LEVEL_RAW;
+    default:
+      return 0;
+  }
+}
+
+static int build_benchmark_output_path(char *buffer,
+                                       size_t buffer_size,
+                                       const aria_autotune_config_t *config,
+                                       const char *filename) {
+  if (!buffer || buffer_size == 0 || !config || !filename) {
+    return 0;
+  }
+
+  if (config->output_dir && config->output_dir[0] != '\0') {
+    if (!ensure_directory_recursive(config->output_dir)) {
+      return 0;
+    }
+    snprintf(buffer, buffer_size, "%s/%s", config->output_dir, filename);
+    return 1;
+  }
+
+  if (!ensure_directory_recursive("out")) {
+    return 0;
+  }
+  snprintf(buffer, buffer_size, "out/%s", filename);
+  return 1;
+}
+
+static void close_file_if_open(FILE **fp) {
+  if (!fp || !*fp) {
+    return;
+  }
+  fclose(*fp);
+  *fp = NULL;
 }
 
 static const char *build_type_name(void) {
@@ -88,6 +158,7 @@ static const char *platform_name(void) {
 static void make_run_id(char *buffer, size_t buffer_size) {
   time_t now = time(NULL);
   struct tm tm_info;
+
   if (!buffer || buffer_size == 0) {
     return;
   }
@@ -103,6 +174,7 @@ static void make_run_id(char *buffer, size_t buffer_size) {
 static void make_timestamp(char *buffer, size_t buffer_size) {
   time_t now = time(NULL);
   struct tm tm_info;
+
   if (!buffer || buffer_size == 0) {
     return;
   }
@@ -126,126 +198,6 @@ static const char *effective_path_for(const aria_impl_t *impl, size_t len) {
     return impl->name;
   }
   return "unknown";
-}
-
-static double percentile_from_sorted(const double *sorted, size_t count, double pct) {
-  double pos;
-  size_t lo;
-  size_t hi;
-  double frac;
-
-  if (!sorted || count == 0) {
-    return 0.0;
-  }
-  if (count == 1) {
-    return sorted[0];
-  }
-  if (pct <= 0.0) {
-    return sorted[0];
-  }
-  if (pct >= 1.0) {
-    return sorted[count - 1];
-  }
-
-  pos = pct * (double)(count - 1);
-  lo = (size_t)pos;
-  hi = (lo + 1 < count) ? (lo + 1) : lo;
-  frac = pos - (double)lo;
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
-}
-
-static double mean_of_samples(const double *samples, size_t count) {
-  double sum = 0.0;
-  size_t i;
-
-  if (!samples || count == 0) {
-    return 0.0;
-  }
-  for (i = 0; i < count; ++i) {
-    sum += samples[i];
-  }
-  return sum / (double)count;
-}
-
-static double trimmed_mean_of_samples(const double *samples, size_t count) {
-  double *sorted;
-  double sum = 0.0;
-  size_t start = 0;
-  size_t end = count;
-  size_t i;
-
-  if (!samples || count == 0) {
-    return 0.0;
-  }
-
-  sorted = (double *)malloc(sizeof(double) * count);
-  if (!sorted) {
-    return samples[0];
-  }
-  for (i = 0; i < count; ++i) {
-    sorted[i] = samples[i];
-  }
-  qsort(sorted, count, sizeof(double), cmp_double);
-  bench_trim_bounds(count, &start, &end);
-  for (i = start; i < end; ++i) {
-    sum += sorted[i];
-  }
-  free(sorted);
-  return sum / (double)(end - start);
-}
-
-static summary_stats_t compute_summary_stats(const bench_result_t *result) {
-  summary_stats_t stats;
-  double *per_call = NULL;
-  double *per_byte = NULL;
-  double *per_call_sorted = NULL;
-  size_t i;
-  size_t count = 0;
-
-  memset(&stats, 0, sizeof(stats));
-  if (!result || result->samples.count == 0 || result->inner == 0 || result->qpc_freq == 0) {
-    return stats;
-  }
-
-  count = result->samples.count;
-  per_call = (double *)malloc(sizeof(double) * count);
-  per_call_sorted = (double *)malloc(sizeof(double) * count);
-  if (result->len > 0) {
-    per_byte = (double *)malloc(sizeof(double) * count);
-  }
-  if (!per_call || !per_call_sorted || (result->len > 0 && !per_byte)) {
-    free(per_call);
-    free(per_call_sorted);
-    free(per_byte);
-    return stats;
-  }
-
-  for (i = 0; i < count; ++i) {
-    const double ns_corrected = bench_ticks_to_ns(result->samples.corrected_ticks[i], result->qpc_freq);
-    per_call[i] = ns_corrected / (double)result->inner;
-    per_call_sorted[i] = per_call[i];
-    if (per_byte) {
-      per_byte[i] = ns_corrected / ((double)result->inner * (double)result->len);
-    }
-  }
-
-  qsort(per_call_sorted, count, sizeof(double), cmp_double);
-
-  stats.n_samples = count;
-  stats.ns_per_call_mean = mean_of_samples(per_call, count);
-  stats.ns_per_call_trimmed_mean = trimmed_mean_of_samples(per_call, count);
-  stats.ns_per_call_p50 = percentile_from_sorted(per_call_sorted, count, 0.50);
-  stats.ns_per_call_p95 = percentile_from_sorted(per_call_sorted, count, 0.95);
-  stats.ns_per_call_p99 = percentile_from_sorted(per_call_sorted, count, 0.99);
-  if (per_byte) {
-    stats.ns_per_byte_mean_corrected = mean_of_samples(per_byte, count);
-    stats.ns_per_byte_trimmed_mean_corrected = trimmed_mean_of_samples(per_byte, count);
-  }
-
-  free(per_call);
-  free(per_call_sorted);
-  free(per_byte);
-  return stats;
 }
 
 static void write_raw_sample_row(FILE *raw_csv,
@@ -306,7 +258,7 @@ static void write_summary_row(FILE *summary_csv,
                               const char *scenario_name,
                               const char *effective_path,
                               stat_mode_t stat_mode,
-                              const summary_stats_t *stats) {
+                              const bench_summary_stats_t *stats) {
   if (!summary_csv || !run_id || !impl_name || !scenario_name || !effective_path || !stats) {
     return;
   }
@@ -328,15 +280,51 @@ static void write_summary_row(FILE *summary_csv,
           stats->ns_per_byte_trimmed_mean_corrected);
 }
 
+static const char *autotune_policy_basis_name(aria_autotune_policy_basis_t basis) {
+  return (basis == ARIA_POLICY_BASIS_RAW) ? "raw" : "normalized";
+}
+
+static const char *autotune_tail_policy_name(aria_autotune_tail_policy_t tail_policy) {
+  return (tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE) ? "conservative" : "native";
+}
+
+static const char *autotune_profile_name(aria_autotune_profile_t profile) {
+  switch (profile) {
+    case ARIA_AUTOTUNE_PROFILE_SMOKE:
+      return "smoke";
+    case ARIA_AUTOTUNE_PROFILE_TEST:
+      return "test";
+    case ARIA_AUTOTUNE_PROFILE_FULL:
+      return "full";
+    default:
+      return "unknown";
+  }
+}
+
+static const char *output_level_name(aria_output_level_t output_level) {
+  switch (output_level) {
+    case ARIA_OUTPUT_LEVEL_DEFAULT:
+      return "default";
+    case ARIA_OUTPUT_LEVEL_DEBUG:
+      return "debug";
+    case ARIA_OUTPUT_LEVEL_RAW:
+      return "raw";
+    default:
+      return "unknown";
+  }
+}
+
 static void write_run_meta(FILE *meta_json,
                            const char *run_id,
                            const char *timestamp,
                            size_t warmup,
                            size_t outer,
-                           scenario_t scenario) {
+                           scenario_t scenario,
+                           int autotune_enabled,
+                           const aria_autotune_config_t *autotune_config) {
   size_t trim_percent = (size_t)(BENCH_TRIM_RATIO * 100.0);
 
-  if (!meta_json || !run_id || !timestamp) {
+  if (!meta_json || !run_id || !timestamp || !autotune_config) {
     return;
   }
 
@@ -350,23 +338,272 @@ static void write_run_meta(FILE *meta_json,
   fprintf(meta_json, "  \"outer_count\": %zu,\n", outer);
   fprintf(meta_json, "  \"trim_ratio\": %.2f,\n", BENCH_TRIM_RATIO);
   fprintf(meta_json, "  \"trim_percent\": %zu,\n", trim_percent);
-  fprintf(meta_json, "  \"scenario_list\": [\"%s\"]\n", aria_scenario_name(scenario));
+  fprintf(meta_json, "  \"scenario_list\": [\"%s\"],\n", aria_scenario_name(scenario));
+  fprintf(meta_json, "  \"autotune_enabled\": %s,\n", autotune_enabled ? "true" : "false");
+  fprintf(meta_json, "  \"output_level\": \"%s\",\n", output_level_name(autotune_config->output_level));
+  fprintf(meta_json, "  \"output_dir\": \"%s\",\n",
+          (autotune_config->output_dir && autotune_config->output_dir[0] != '\0') ? autotune_config->output_dir : "");
+  fprintf(meta_json, "  \"output_prefix\": \"%s\",\n",
+          autotune_config->output_prefix ? autotune_config->output_prefix : "");
+  fprintf(meta_json, "  \"emitted_files\": {\n");
+  fprintf(meta_json, "    \"results_csv\": %s,\n",
+          should_emit_benchmark_output(autotune_config->output_level, BENCH_OUTPUT_RESULTS) ? "true" : "false");
+  fprintf(meta_json, "    \"summary_stats_csv\": %s,\n",
+          should_emit_benchmark_output(autotune_config->output_level, BENCH_OUTPUT_SUMMARY) ? "true" : "false");
+  fprintf(meta_json, "    \"run_meta_json\": true,\n");
+  fprintf(meta_json, "    \"keysetup_csv\": %s,\n",
+          should_emit_benchmark_output(autotune_config->output_level, BENCH_OUTPUT_KEYSETUP) ? "true" : "false");
+  fprintf(meta_json, "    \"raw_samples_csv\": %s\n",
+          should_emit_benchmark_output(autotune_config->output_level, BENCH_OUTPUT_RAW) ? "true" : "false");
+  fprintf(meta_json, "  }\n");
   fprintf(meta_json, "}\n");
 }
 
-static scenario_t parse_scenario(int argc, char **argv) {
-  for (int i = 1; i < argc; ++i) {
-    if (strcmp(argv[i], "--scenario") == 0 && (i + 1) < argc) {
-      const char *value = argv[i + 1];
-      if (strcmp(value, "server") == 0 || strcmp(value, "highperf") == 0) {
-        return SCENARIO_HIGH_PERF_SERVER;
+static int parse_size_value(const char *option, const char *value, size_t *out) {
+  char *endptr = NULL;
+  unsigned long long parsed = 0;
+
+  if (!option || !value || !out) {
+    return 0;
+  }
+
+  errno = 0;
+  parsed = strtoull(value, &endptr, 10);
+  if (errno != 0 || endptr == value || (endptr && *endptr != '\0')) {
+    fprintf(stderr, "Invalid value for %s: %s\n", option, value);
+    return 0;
+  }
+
+  *out = (size_t)parsed;
+  return 1;
+}
+
+static int parse_double_value(const char *option, const char *value, double *out) {
+  char *endptr = NULL;
+  double parsed = 0.0;
+
+  if (!option || !value || !out) {
+    return 0;
+  }
+
+  errno = 0;
+  parsed = strtod(value, &endptr);
+  if (errno != 0 || endptr == value || (endptr && *endptr != '\0')) {
+    fprintf(stderr, "Invalid value for %s: %s\n", option, value);
+    return 0;
+  }
+
+  *out = parsed;
+  return 1;
+}
+
+static int parse_cli_options(int argc,
+                             char **argv,
+                             scenario_t *scenario,
+                             int *enable_autotune,
+                             aria_autotune_config_t *autotune_config) {
+  int i;
+
+  if (!scenario || !enable_autotune || !autotune_config) {
+    return 0;
+  }
+
+  *scenario = SCENARIO_HIGH_PERF_SERVER;
+  *enable_autotune = 0;
+
+  for (i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "--scenario") == 0) {
+      if ((i + 1) >= argc) {
+        fprintf(stderr, "Missing value for --scenario.\n");
+        return 0;
       }
-      if (strcmp(value, "lowpower") == 0 || strcmp(value, "client") == 0) {
-        return SCENARIO_LOW_POWER_CLIENT;
+      ++i;
+      if (strcmp(argv[i], "server") == 0 || strcmp(argv[i], "highperf") == 0) {
+        *scenario = SCENARIO_HIGH_PERF_SERVER;
+      } else if (strcmp(argv[i], "lowpower") == 0 || strcmp(argv[i], "client") == 0) {
+        *scenario = SCENARIO_LOW_POWER_CLIENT;
+      } else {
+        fprintf(stderr, "Unknown scenario: %s\n", argv[i]);
+        return 0;
       }
+      continue;
+    }
+
+    if (strcmp(argv[i], "--autotune") == 0) {
+      *enable_autotune = 1;
+      continue;
+    }
+
+    if (strcmp(argv[i], "--policy-collapse-ref-fallback") == 0) {
+      autotune_config->collapse_ref_fallback = 1;
+      continue;
+    }
+
+    if (strcmp(argv[i], "--no-policy-collapse-ref-fallback") == 0) {
+      autotune_config->collapse_ref_fallback = 0;
+      continue;
+    }
+
+    if ((i + 1) >= argc) {
+      continue;
+    }
+
+    if (strcmp(argv[i], "--output-level") == 0) {
+      if (strcmp(argv[i + 1], "default") == 0) {
+        autotune_config->output_level = ARIA_OUTPUT_LEVEL_DEFAULT;
+      } else if (strcmp(argv[i + 1], "debug") == 0) {
+        autotune_config->output_level = ARIA_OUTPUT_LEVEL_DEBUG;
+      } else if (strcmp(argv[i + 1], "raw") == 0) {
+        autotune_config->output_level = ARIA_OUTPUT_LEVEL_RAW;
+      } else {
+        fprintf(stderr, "Unknown output level: %s\n", argv[i + 1]);
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--output-dir") == 0 || strcmp(argv[i], "--autotune-output-dir") == 0) {
+      autotune_config->output_dir = argv[i + 1];
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--autotune-profile") == 0) {
+      if (strcmp(argv[i + 1], "smoke") == 0) {
+        aria_autotune_config_apply_profile(autotune_config, ARIA_AUTOTUNE_PROFILE_SMOKE);
+      } else if (strcmp(argv[i + 1], "test") == 0) {
+        aria_autotune_config_apply_profile(autotune_config, ARIA_AUTOTUNE_PROFILE_TEST);
+      } else if (strcmp(argv[i + 1], "full") == 0) {
+        aria_autotune_config_apply_profile(autotune_config, ARIA_AUTOTUNE_PROFILE_FULL);
+      } else {
+        fprintf(stderr, "Unknown autotune profile: %s\n", argv[i + 1]);
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--autotune-min-len") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->min_len)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--autotune-max-len") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->max_len)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--coarse-small-step") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_small_step)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--coarse-medium-step") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_medium_step)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--coarse-large-step") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_large_step)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--coarse-small-limit") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_small_limit)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--coarse-medium-limit") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_medium_limit)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--refine-step") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->refine_step)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--coarse-iterations") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_iterations)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--refine-iterations") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->refine_iterations)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--winner-margin-pct") == 0) {
+      if (!parse_double_value(argv[i], argv[i + 1], &autotune_config->winner_margin_pct)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--stability-min-run") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->stability_min_run)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--policy-min-bucket-points") == 0) {
+      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->policy_min_bucket_points)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--policy-basis") == 0) {
+      if (strcmp(argv[i + 1], "raw") == 0) {
+        autotune_config->policy_basis = ARIA_POLICY_BASIS_RAW;
+      } else if (strcmp(argv[i + 1], "normalized") == 0) {
+        autotune_config->policy_basis = ARIA_POLICY_BASIS_NORMALIZED;
+      } else {
+        fprintf(stderr, "Unknown policy basis: %s\n", argv[i + 1]);
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--tail-policy") == 0) {
+      if (strcmp(argv[i + 1], "native") == 0) {
+        autotune_config->tail_policy = ARIA_TAIL_POLICY_NATIVE;
+      } else if (strcmp(argv[i + 1], "conservative") == 0) {
+        autotune_config->tail_policy = ARIA_TAIL_POLICY_CONSERVATIVE;
+      } else {
+        fprintf(stderr, "Unknown tail policy: %s\n", argv[i + 1]);
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--autotune-output-prefix") == 0) {
+      autotune_config->output_prefix = argv[i + 1];
+      ++i;
+      continue;
     }
   }
-  return SCENARIO_HIGH_PERF_SERVER;
+
+  return 1;
 }
 
 int main(int argc, char **argv) {
@@ -380,9 +617,28 @@ int main(int argc, char **argv) {
   const size_t buffer_size = 1024 * 1024;
   const stat_mode_t stat_mode = STAT_TRIMMED_MEAN;
   uint64_t target_ticks = 0;
-  const scenario_t scenario = parse_scenario(argc, argv);
+  scenario_t scenario = SCENARIO_HIGH_PERF_SERVER;
+  int enable_autotune = 0;
+  aria_autotune_config_t autotune_config;
   char run_id[64];
   char benchmark_timestamp[64];
+  char key_csv_path[512];
+  char csv_path[512];
+  char raw_csv_path[512];
+  char summary_csv_path[512];
+  char meta_json_path[512];
+  int exit_code = 0;
+
+  FILE *key_csv = NULL;
+  FILE *csv = NULL;
+  FILE *raw_csv = NULL;
+  FILE *summary_csv = NULL;
+  FILE *meta_json = NULL;
+
+  aria_autotune_config_init(&autotune_config);
+  if (!parse_cli_options(argc, argv, &scenario, &enable_autotune, &autotune_config)) {
+    return 1;
+  }
 
   uint8_t *input = (uint8_t *)malloc(buffer_size);
   uint8_t *output = (uint8_t *)malloc(buffer_size);
@@ -396,15 +652,6 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < buffer_size; ++i) {
     input[i] = (uint8_t)(i & 0xFFu);
   }
-
-  // const aria_impl_t *impl = aria_runtime_dispatch_scenario(0, scenario);
-  // if (!impl || !impl->encrypt) {
-  //   fprintf(stderr, "No ARIA implementation available.\n");
-  //   free(input);
-  //   free(output);
-  //   return 1;
-  // }
-  // printf("[INFO] scenario=%s selected_impl=%s\n", aria_scenario_name(scenario), impl->name);
 
   aria_ctx_t ctx;
   uint8_t key[32] = {0};
@@ -424,151 +671,251 @@ int main(int argc, char **argv) {
   }
 #endif
 
-  ensure_out_dir();
   make_run_id(run_id, sizeof(run_id));
   make_timestamp(benchmark_timestamp, sizeof(benchmark_timestamp));
 
-  FILE *key_csv = fopen("out/keysetup.csv", "w");
-  if (!key_csv) {
-    fprintf(stderr, "Failed to open out/keysetup.csv.\n");
+  if (should_emit_benchmark_output(autotune_config.output_level, BENCH_OUTPUT_KEYSETUP)) {
+    if (!build_benchmark_output_path(key_csv_path, sizeof(key_csv_path), &autotune_config, "keysetup.csv")) {
+      fprintf(stderr, "Failed to build keysetup output path.\n");
+      free(input);
+      free(output);
+      return 1;
+    }
+    key_csv = fopen(key_csv_path, "w");
+    if (!key_csv) {
+      fprintf(stderr, "Failed to open %s.\n", key_csv_path);
+      free(input);
+      free(output);
+      return 1;
+    }
+    fprintf(key_csv, "keybits,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,stat_mode,sink,scenario\n");
+  }
+
+  if (should_emit_benchmark_output(autotune_config.output_level, BENCH_OUTPUT_RESULTS)) {
+    if (!build_benchmark_output_path(csv_path, sizeof(csv_path), &autotune_config, "results.csv")) {
+      fprintf(stderr, "Failed to build results output path.\n");
+      close_file_if_open(&key_csv);
+      free(input);
+      free(output);
+      return 1;
+    }
+    csv = fopen(csv_path, "w");
+    if (!csv) {
+      fprintf(stderr, "Failed to open %s.\n", csv_path);
+      close_file_if_open(&key_csv);
+      free(input);
+      free(output);
+      return 1;
+    }
+    fprintf(csv, "len,impl,effective_path,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,ns_per_byte,ns_per_byte_corrected,stat_mode,sink,scenario\n");
+  }
+
+  if (should_emit_benchmark_output(autotune_config.output_level, BENCH_OUTPUT_RAW)) {
+    if (!build_benchmark_output_path(raw_csv_path, sizeof(raw_csv_path), &autotune_config, "raw_samples.csv")) {
+      fprintf(stderr, "Failed to build raw samples output path.\n");
+      close_file_if_open(&csv);
+      close_file_if_open(&key_csv);
+      free(input);
+      free(output);
+      return 1;
+    }
+    raw_csv = fopen(raw_csv_path, "w");
+    if (!raw_csv) {
+      fprintf(stderr, "Failed to open %s.\n", raw_csv_path);
+      close_file_if_open(&csv);
+      close_file_if_open(&key_csv);
+      free(input);
+      free(output);
+      return 1;
+    }
+    fprintf(raw_csv, "run_id,len,impl,scenario,outer_idx,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_corrected,ns_per_call_corrected,ns_per_byte_corrected,effective_path\n");
+  }
+
+  if (should_emit_benchmark_output(autotune_config.output_level, BENCH_OUTPUT_SUMMARY)) {
+    if (!build_benchmark_output_path(summary_csv_path, sizeof(summary_csv_path), &autotune_config, "summary_stats.csv")) {
+      fprintf(stderr, "Failed to build summary output path.\n");
+      close_file_if_open(&raw_csv);
+      close_file_if_open(&csv);
+      close_file_if_open(&key_csv);
+      free(input);
+      free(output);
+      return 1;
+    }
+    summary_csv = fopen(summary_csv_path, "w");
+    if (!summary_csv) {
+      fprintf(stderr, "Failed to open %s.\n", summary_csv_path);
+      close_file_if_open(&raw_csv);
+      close_file_if_open(&csv);
+      close_file_if_open(&key_csv);
+      free(input);
+      free(output);
+      return 1;
+    }
+    fprintf(summary_csv, "run_id,len,impl,scenario,effective_path,n_samples,stat_mode,ns_per_call_mean,ns_per_call_trimmed_mean,ns_per_call_p50,ns_per_call_p95,ns_per_call_p99,ns_per_byte_mean_corrected,ns_per_byte_trimmed_mean_corrected\n");
+  }
+
+  if (!build_benchmark_output_path(meta_json_path, sizeof(meta_json_path), &autotune_config, "run_meta.json")) {
+    fprintf(stderr, "Failed to build run_meta output path.\n");
+    close_file_if_open(&summary_csv);
+    close_file_if_open(&raw_csv);
+    close_file_if_open(&csv);
+    close_file_if_open(&key_csv);
     free(input);
     free(output);
     return 1;
   }
-
-  FILE *csv = fopen("out/results.csv", "w");
-  if (!csv) {
-    fprintf(stderr, "Failed to open out/results.csv.\n");
-    fclose(key_csv);
-    free(input);
-    free(output);
-    return 1;
-  }
-
-  FILE *raw_csv = fopen("out/raw_samples.csv", "w");
-  if (!raw_csv) {
-    fprintf(stderr, "Failed to open out/raw_samples.csv.\n");
-    fclose(csv);
-    fclose(key_csv);
-    free(input);
-    free(output);
-    return 1;
-  }
-
-  FILE *summary_csv = fopen("out/summary_stats.csv", "w");
-  if (!summary_csv) {
-    fprintf(stderr, "Failed to open out/summary_stats.csv.\n");
-    fclose(raw_csv);
-    fclose(csv);
-    fclose(key_csv);
-    free(input);
-    free(output);
-    return 1;
-  }
-
-  FILE *meta_json = fopen("out/run_meta.json", "w");
+  meta_json = fopen(meta_json_path, "w");
   if (!meta_json) {
-    fprintf(stderr, "Failed to open out/run_meta.json.\n");
-    fclose(summary_csv);
-    fclose(raw_csv);
-    fclose(csv);
-    fclose(key_csv);
+    fprintf(stderr, "Failed to open %s.\n", meta_json_path);
+    close_file_if_open(&summary_csv);
+    close_file_if_open(&raw_csv);
+    close_file_if_open(&csv);
+    close_file_if_open(&key_csv);
     free(input);
     free(output);
     return 1;
   }
+  write_run_meta(meta_json, run_id, benchmark_timestamp, warmup, outer, scenario, enable_autotune, &autotune_config);
 
-  fprintf(key_csv, "keybits,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,stat_mode,sink,scenario\n");
-  fprintf(csv, "len,impl,effective_path,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,ns_per_byte,ns_per_byte_corrected,stat_mode,sink,scenario\n");
-  fprintf(raw_csv, "run_id,len,impl,scenario,outer_idx,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_corrected,ns_per_call_corrected,ns_per_byte_corrected,effective_path\n");
-  fprintf(summary_csv, "run_id,len,impl,scenario,effective_path,n_samples,stat_mode,ns_per_call_mean,ns_per_call_trimmed_mean,ns_per_call_p50,ns_per_call_p95,ns_per_call_p99,ns_per_byte_mean_corrected,ns_per_byte_trimmed_mean_corrected\n");
-  write_run_meta(meta_json, run_id, benchmark_timestamp, warmup, outer, scenario);
+  {
+    const aria_impl_t *impls[] = {
+      &aria_ref_impl,
+      &aria_linux_aesni_avx_impl,
+      &aria_linux_aesni_avx2_impl
+    };
+    const size_t impls_count = sizeof(impls) / sizeof(impls[0]);
+    uint64_t final_sink = 0;
 
-  const aria_impl_t *impls[] = {
-    &aria_ref_impl,
-    &aria_linux_aesni_avx_impl,
-    &aria_linux_aesni_avx2_impl
-  };
-  const size_t impls_count = sizeof(impls) / sizeof(impls[0]);
-
-  printf("[INFO] scenario=%s\n", aria_scenario_name(scenario));
-  for (size_t k = 0; k < impls_count; ++k) {
-    if (impls[k]->is_supported && !impls[k]->is_supported()) {
-      printf("[INFO] skipping_impl=%s (unsupported)\n", impls[k]->name);
-      continue;
-    }
-    printf("[INFO] will_measure_impl=%s\n", impls[k]->name);
-  }
-  
-  uint64_t final_sink = 0;
-  bench_result_t keysetup_result = bench_run_keysetup(aria_ref_impl.init, &ctx, key, keybits, outer, target_ticks, inner_max, stat_mode, warmup);
-  final_sink ^= keysetup_result.sink;
-  fprintf(key_csv, "%d,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%s,%llu,%s\n",
-          keybits,
-          keysetup_result.outer,
-          keysetup_result.inner,
-          (unsigned long long)keysetup_result.total_ticks,
-          (unsigned long long)keysetup_result.empty_ticks,
-          (unsigned long long)keysetup_result.corrected_ticks,
-          (unsigned long long)keysetup_result.qpc_freq,
-          keysetup_result.ns_total,
-          keysetup_result.ns_per_call,
-          bench_stat_mode_name(keysetup_result.stat_mode),
-          (unsigned long long)keysetup_result.sink,
-          aria_scenario_name(scenario));
-  bench_result_cleanup(&keysetup_result);
-  memset(key, 0, sizeof(key));
-  aria_ref_impl.init(&ctx, key, keybits);
-    
-  for (size_t k = 0; k < impls_count; ++k) {
-    const aria_impl_t *impl = impls[k];
-    if (impl->is_supported && !impl->is_supported()) {
-      continue;
-    }
-
-    impl->init(&ctx, key, keybits);
-
-    for (size_t i = 0; i < lengths_count; ++i) {
-      const size_t len = lengths[i];
-      const char *effective_path = effective_path_for(impl, len);
-      const char *scenario_name = aria_scenario_name(scenario);
-      bench_result_t result = bench_run(impl->encrypt, &ctx, input, output, len, outer, target_ticks, inner_max, stat_mode, warmup);
-      summary_stats_t stats = compute_summary_stats(&result);
-      final_sink ^= result.sink;
-
-      fprintf(csv, "%zu,%s,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu,%s\n",
-              len,
-              impl->name,
-              effective_path,
-              result.outer,
-              result.inner,
-              (unsigned long long)result.total_ticks,
-              (unsigned long long)result.empty_ticks,
-              (unsigned long long)result.corrected_ticks,
-              (unsigned long long)result.qpc_freq,
-              result.ns_total,
-              result.ns_per_call,
-              result.ns_per_byte,
-              result.ns_per_byte_corrected,
-              bench_stat_mode_name(result.stat_mode),
-              (unsigned long long)result.sink,
-              scenario_name);
-
-      for (size_t sample_idx = 0; sample_idx < result.samples.count; ++sample_idx) {
-        write_raw_sample_row(raw_csv, run_id, len, impl->name, scenario_name, sample_idx, &result, effective_path);
+    printf("[INFO] scenario=%s\n", aria_scenario_name(scenario));
+    for (size_t k = 0; k < impls_count; ++k) {
+      if (impls[k]->is_supported && !impls[k]->is_supported()) {
+        printf("[INFO] skipping_impl=%s (unsupported)\n", impls[k]->name);
+        continue;
       }
-      write_summary_row(summary_csv, run_id, len, impl->name, scenario_name, effective_path, result.stat_mode, &stats);
-      bench_result_cleanup(&result);
+      printf("[INFO] will_measure_impl=%s\n", impls[k]->name);
     }
+
+    {
+      bench_result_t keysetup_result = bench_run_keysetup(aria_ref_impl.init,
+                                                          &ctx,
+                                                          key,
+                                                          keybits,
+                                                          outer,
+                                                          target_ticks,
+                                                          inner_max,
+                                                          stat_mode,
+                                                          warmup);
+      final_sink ^= keysetup_result.sink;
+      if (key_csv) {
+        fprintf(key_csv, "%d,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%s,%llu,%s\n",
+                keybits,
+                keysetup_result.outer,
+                keysetup_result.inner,
+                (unsigned long long)keysetup_result.total_ticks,
+                (unsigned long long)keysetup_result.empty_ticks,
+                (unsigned long long)keysetup_result.corrected_ticks,
+                (unsigned long long)keysetup_result.qpc_freq,
+                keysetup_result.ns_total,
+                keysetup_result.ns_per_call,
+                bench_stat_mode_name(keysetup_result.stat_mode),
+                (unsigned long long)keysetup_result.sink,
+                aria_scenario_name(scenario));
+      }
+      bench_result_cleanup(&keysetup_result);
+      memset(key, 0, sizeof(key));
+      aria_ref_impl.init(&ctx, key, keybits);
+    }
+
+    for (size_t k = 0; k < impls_count; ++k) {
+      const aria_impl_t *impl = impls[k];
+      if (impl->is_supported && !impl->is_supported()) {
+        continue;
+      }
+
+      impl->init(&ctx, key, keybits);
+
+      for (size_t i = 0; i < lengths_count; ++i) {
+        const size_t len = lengths[i];
+        const char *effective_path = effective_path_for(impl, len);
+        const char *scenario_name = aria_scenario_name(scenario);
+        bench_result_t result = bench_run(impl->encrypt,
+                                          &ctx,
+                                          input,
+                                          output,
+                                          len,
+                                          outer,
+                                          target_ticks,
+                                          inner_max,
+                                          stat_mode,
+                                          warmup);
+        bench_summary_stats_t stats = bench_compute_summary_stats(&result);
+        final_sink ^= result.sink;
+
+        if (csv) {
+          fprintf(csv, "%zu,%s,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu,%s\n",
+                  len,
+                  impl->name,
+                  effective_path,
+                  result.outer,
+                  result.inner,
+                  (unsigned long long)result.total_ticks,
+                  (unsigned long long)result.empty_ticks,
+                  (unsigned long long)result.corrected_ticks,
+                  (unsigned long long)result.qpc_freq,
+                  result.ns_total,
+                  result.ns_per_call,
+                  result.ns_per_byte,
+                  result.ns_per_byte_corrected,
+                  bench_stat_mode_name(result.stat_mode),
+                  (unsigned long long)result.sink,
+                  scenario_name);
+        }
+
+        for (size_t sample_idx = 0; sample_idx < result.samples.count; ++sample_idx) {
+          write_raw_sample_row(raw_csv, run_id, len, impl->name, scenario_name, sample_idx, &result, effective_path);
+        }
+        write_summary_row(summary_csv, run_id, len, impl->name, scenario_name, effective_path, result.stat_mode, &stats);
+        bench_result_cleanup(&result);
+      }
+    }
+
+    close_file_if_open(&meta_json);
+    close_file_if_open(&summary_csv);
+    close_file_if_open(&raw_csv);
+    close_file_if_open(&key_csv);
+    close_file_if_open(&csv);
+
+    if (enable_autotune) {
+      printf("[INFO] autotune enabled, output_prefix=%s output_dir=%s output_level=%s profile=%s basis=%s tail_policy=%s collapse_ref_fallback=%s margin=%.2f min_run=%zu min_bucket=%zu range=%zu..%zu\n",
+             autotune_config.output_prefix,
+             (autotune_config.output_dir && autotune_config.output_dir[0] != '\0') ? autotune_config.output_dir : "",
+             output_level_name(autotune_config.output_level),
+             autotune_profile_name(autotune_config.profile),
+             autotune_policy_basis_name(autotune_config.policy_basis),
+             autotune_tail_policy_name(autotune_config.tail_policy),
+             autotune_config.collapse_ref_fallback ? "on" : "off",
+             autotune_config.winner_margin_pct,
+             autotune_config.stability_min_run,
+             autotune_config.policy_min_bucket_points,
+             autotune_config.min_len,
+             autotune_config.max_len);
+      if (!aria_autotune_run(&autotune_config,
+                             input,
+                             output,
+                             buffer_size,
+                             target_ticks,
+                             inner_max,
+                             warmup,
+                             stat_mode)) {
+        fprintf(stderr, "Failed to complete autotune run.\n");
+        exit_code = 1;
+      }
+    }
+
+    printf("sink=%llu\n", (unsigned long long)final_sink);
   }
 
-  fclose(meta_json);
-  fclose(summary_csv);
-  fclose(raw_csv);
-  fclose(key_csv);
-  fclose(csv);
-  printf("sink=%llu\n", (unsigned long long)final_sink);
   free(input);
   free(output);
-  return 0;
+  return exit_code;
 }

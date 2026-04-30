@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -183,6 +184,90 @@ static int cmp_u64(const void *a, const void *b) {
   return 0;
 }
 
+static int cmp_double(const void *a, const void *b) {
+  const double va = *(const double *)a;
+  const double vb = *(const double *)b;
+  if (va < vb) {
+    return -1;
+  }
+  if (va > vb) {
+    return 1;
+  }
+  return 0;
+}
+
+static double percentile_from_sorted(const double *sorted, size_t count, double pct) {
+  double pos;
+  size_t lo;
+  size_t hi;
+  double frac;
+
+  if (!sorted || count == 0) {
+    return 0.0;
+  }
+  if (count == 1) {
+    return sorted[0];
+  }
+  if (pct <= 0.0) {
+    return sorted[0];
+  }
+  if (pct >= 1.0) {
+    return sorted[count - 1];
+  }
+
+  pos = pct * (double)(count - 1);
+  lo = (size_t)pos;
+  hi = (lo + 1 < count) ? (lo + 1) : lo;
+  frac = pos - (double)lo;
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
+}
+
+static double mean_of_samples(const double *samples, size_t count) {
+  double sum = 0.0;
+  size_t i;
+
+  if (!samples || count == 0) {
+    return 0.0;
+  }
+
+  for (i = 0; i < count; ++i) {
+    sum += samples[i];
+  }
+
+  return sum / (double)count;
+}
+
+static double trimmed_mean_of_samples(const double *samples, size_t count) {
+  double *sorted;
+  double sum = 0.0;
+  size_t start = 0;
+  size_t end = count;
+  size_t i;
+
+  if (!samples || count == 0) {
+    return 0.0;
+  }
+
+  sorted = (double *)malloc(sizeof(double) * count);
+  if (!sorted) {
+    return samples[0];
+  }
+
+  for (i = 0; i < count; ++i) {
+    sorted[i] = samples[i];
+  }
+
+  qsort(sorted, count, sizeof(double), cmp_double);
+  bench_trim_bounds(count, &start, &end);
+
+  for (i = start; i < end; ++i) {
+    sum += sorted[i];
+  }
+
+  free(sorted);
+  return sum / (double)(end - start);
+}
+
 double bench_ticks_to_ns(uint64_t ticks, uint64_t freq) {
   if (freq == 0) {
     return 0.0;
@@ -264,6 +349,71 @@ void bench_result_cleanup(bench_result_t *result) {
   result->samples.total_ticks = NULL;
   result->samples.empty_ticks = NULL;
   result->samples.corrected_ticks = NULL;
+}
+
+bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result) {
+  bench_summary_stats_t stats;
+  double *per_call = NULL;
+  double *per_call_sorted = NULL;
+  double *per_byte = NULL;
+  double *per_byte_sorted = NULL;
+  size_t count = 0;
+  size_t i;
+
+  memset(&stats, 0, sizeof(stats));
+  if (!result || result->samples.count == 0 || result->inner == 0 || result->qpc_freq == 0) {
+    return stats;
+  }
+
+  count = result->samples.count;
+  per_call = (double *)malloc(sizeof(double) * count);
+  per_call_sorted = (double *)malloc(sizeof(double) * count);
+  if (result->len > 0) {
+    per_byte = (double *)malloc(sizeof(double) * count);
+    per_byte_sorted = (double *)malloc(sizeof(double) * count);
+  }
+
+  if (!per_call || !per_call_sorted || (result->len > 0 && (!per_byte || !per_byte_sorted))) {
+    free(per_call);
+    free(per_call_sorted);
+    free(per_byte);
+    free(per_byte_sorted);
+    return stats;
+  }
+
+  for (i = 0; i < count; ++i) {
+    const double ns_corrected = bench_ticks_to_ns(result->samples.corrected_ticks[i], result->qpc_freq);
+    per_call[i] = ns_corrected / (double)result->inner;
+    per_call_sorted[i] = per_call[i];
+    if (per_byte && per_byte_sorted) {
+      per_byte[i] = ns_corrected / ((double)result->inner * (double)result->len);
+      per_byte_sorted[i] = per_byte[i];
+    }
+  }
+
+  qsort(per_call_sorted, count, sizeof(double), cmp_double);
+  if (per_byte_sorted) {
+    qsort(per_byte_sorted, count, sizeof(double), cmp_double);
+  }
+
+  stats.n_samples = count;
+  stats.ns_per_call_mean = mean_of_samples(per_call, count);
+  stats.ns_per_call_trimmed_mean = trimmed_mean_of_samples(per_call, count);
+  stats.ns_per_call_p50 = percentile_from_sorted(per_call_sorted, count, 0.50);
+  stats.ns_per_call_p95 = percentile_from_sorted(per_call_sorted, count, 0.95);
+  stats.ns_per_call_p99 = percentile_from_sorted(per_call_sorted, count, 0.99);
+
+  if (per_byte && per_byte_sorted) {
+    stats.ns_per_byte_mean_corrected = mean_of_samples(per_byte, count);
+    stats.ns_per_byte_trimmed_mean_corrected = trimmed_mean_of_samples(per_byte, count);
+    stats.ns_per_byte_p50_corrected = percentile_from_sorted(per_byte_sorted, count, 0.50);
+  }
+
+  free(per_call);
+  free(per_call_sorted);
+  free(per_byte);
+  free(per_byte_sorted);
+  return stats;
 }
 
 const char *bench_stat_mode_name(stat_mode_t mode) {

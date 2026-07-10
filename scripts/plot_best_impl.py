@@ -10,6 +10,7 @@ from plot_common import (
     canonical_impl_from_effective_path,
     configure_matplotlib,
     filter_rows,
+    filter_rows_by_length_range,
     filter_rows_by_key_bits,
     implementation_style,
     load_summary_rows,
@@ -37,10 +38,13 @@ def main() -> None:
 
     input_path = resolve_repo_path(args.input)
     output_dir = resolve_repo_path(args.output_dir)
+    print(f"Summary input: {input_path}")
+    print(f"Figure output dir: {output_dir}")
 
     rows = load_summary_rows(input_path)
     rows = select_rows(rows, run_id=args.run_id, scenario=args.scenario)
     rows = filter_rows(rows, IMPLEMENTATION_ORDER)
+    rows = filter_rows_by_length_range(rows, min_len=args.min_len, max_len=args.max_len)
     metric_column, _, metric_stem = resolve_metric_column(rows, args.metric)
 
     selected_key_bits = [args.key_bits] if args.key_bits is not None else available_key_bits(rows)

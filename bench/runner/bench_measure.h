@@ -46,6 +46,8 @@ typedef struct bench_summary_stats {
   size_t n_samples;
   double ns_per_call_mean;
   double ns_per_call_trimmed_mean;
+  double ns_per_call_min;
+  double ns_per_call_max;
   double ns_per_call_p50;
   double ns_per_call_p95;
   double ns_per_call_p99;

@@ -253,18 +253,23 @@ static void write_raw_sample_row(FILE *raw_csv,
 
 static void write_summary_row(FILE *summary_csv,
                               const char *run_id,
+                              int key_bits,
                               size_t len,
                               const char *impl_name,
                               const char *scenario_name,
                               const char *effective_path,
                               stat_mode_t stat_mode,
+                              size_t warmup_count,
+                              size_t outer_count,
+                              int support_ok,
                               const bench_summary_stats_t *stats) {
   if (!summary_csv || !run_id || !impl_name || !scenario_name || !effective_path || !stats) {
     return;
   }
 
-  fprintf(summary_csv, "%s,%zu,%s,%s,%s,%zu,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+  fprintf(summary_csv, "%s,%d,%zu,%s,%s,%s,%zu,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%zu,%.2f,%d\n",
           run_id,
+          key_bits,
           len,
           impl_name,
           scenario_name,
@@ -277,7 +282,18 @@ static void write_summary_row(FILE *summary_csv,
           stats->ns_per_call_p95,
           stats->ns_per_call_p99,
           stats->ns_per_byte_mean_corrected,
-          stats->ns_per_byte_trimmed_mean_corrected);
+          stats->ns_per_byte_trimmed_mean_corrected,
+          stats->ns_per_call_trimmed_mean,
+          stats->ns_per_byte_trimmed_mean_corrected,
+          stats->ns_per_call_p50,
+          stats->ns_per_call_mean,
+          stats->ns_per_call_min,
+          stats->ns_per_call_max,
+          stats->n_samples,
+          warmup_count,
+          outer_count,
+          BENCH_TRIM_RATIO * 100.0,
+          support_ok);
 }
 
 static const char *autotune_policy_basis_name(aria_autotune_policy_basis_t basis) {
@@ -317,12 +333,15 @@ static const char *output_level_name(aria_output_level_t output_level) {
 static void write_run_meta(FILE *meta_json,
                            const char *run_id,
                            const char *timestamp,
+                           int argc,
+                           char **argv,
                            size_t warmup,
                            size_t outer,
                            scenario_t scenario,
                            int autotune_enabled,
                            const aria_autotune_config_t *autotune_config) {
   size_t trim_percent = (size_t)(BENCH_TRIM_RATIO * 100.0);
+  int argi;
 
   if (!meta_json || !run_id || !timestamp || !autotune_config) {
     return;
@@ -330,7 +349,13 @@ static void write_run_meta(FILE *meta_json,
 
   fprintf(meta_json, "{\n");
   fprintf(meta_json, "  \"run_id\": \"%s\",\n", run_id);
+  fprintf(meta_json, "  \"command_line\": [");
+  for (argi = 0; argi < argc; ++argi) {
+    fprintf(meta_json, "%s\"%s\"", (argi == 0) ? "" : ", ", argv[argi] ? argv[argi] : "");
+  }
+  fprintf(meta_json, "],\n");
   fprintf(meta_json, "  \"benchmark_timestamp\": \"%s\",\n", timestamp);
+  fprintf(meta_json, "  \"timestamp\": \"%s\",\n", timestamp);
   fprintf(meta_json, "  \"platform\": \"%s\",\n", platform_name());
   fprintf(meta_json, "  \"compiler\": \"%s\",\n", compiler_info());
   fprintf(meta_json, "  \"build_type\": \"%s\",\n", build_type_name());
@@ -338,13 +363,35 @@ static void write_run_meta(FILE *meta_json,
   fprintf(meta_json, "  \"outer_count\": %zu,\n", outer);
   fprintf(meta_json, "  \"trim_ratio\": %.2f,\n", BENCH_TRIM_RATIO);
   fprintf(meta_json, "  \"trim_percent\": %zu,\n", trim_percent);
+  fprintf(meta_json, "  \"scenario\": \"%s\",\n", aria_scenario_name(scenario));
   fprintf(meta_json, "  \"scenario_list\": [\"%s\"],\n", aria_scenario_name(scenario));
   fprintf(meta_json, "  \"autotune_enabled\": %s,\n", autotune_enabled ? "true" : "false");
+  fprintf(meta_json, "  \"autotune_profile\": \"%s\",\n", autotune_profile_name(autotune_config->profile));
   fprintf(meta_json, "  \"output_level\": \"%s\",\n", output_level_name(autotune_config->output_level));
   fprintf(meta_json, "  \"output_dir\": \"%s\",\n",
           (autotune_config->output_dir && autotune_config->output_dir[0] != '\0') ? autotune_config->output_dir : "");
   fprintf(meta_json, "  \"output_prefix\": \"%s\",\n",
           autotune_config->output_prefix ? autotune_config->output_prefix : "");
+  fprintf(meta_json, "  \"key_sizes\": [128, 192, 256],\n");
+  fprintf(meta_json, "  \"input_lengths\": { \"benchmark\": [16, 32, 64, 128, 192, 256, 320, 512, 1024, 4096, 16384], \"autotune_min\": %zu, \"autotune_max\": %zu },\n",
+          autotune_config->min_len,
+          autotune_config->max_len);
+  fprintf(meta_json, "  \"coarse_grid_rule\": \"log_backbone_x1_x1.5_plus_structural_units_plus_boundaries\",\n");
+  fprintf(meta_json, "  \"coarse_grid_structural_units\": [16, 256, 512],\n");
+  fprintf(meta_json, "  \"implementations\": [\"ref\", \"linux_aesni_avx\", \"linux_aesni_avx2\"],\n");
+  fprintf(meta_json, "  \"policy_basis\": \"%s\",\n", autotune_policy_basis_name(autotune_config->policy_basis));
+  fprintf(meta_json, "  \"normalization_rules\": {\n");
+  fprintf(meta_json, "    \"ref_fallback\": \"%s\",\n", autotune_config->collapse_ref_fallback ? "ref" : "impl");
+  fprintf(meta_json, "    \"linux_aesni_avx_plus_ref_tail\": \"%s\",\n",
+          autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE ? "ref" : "linux_aesni_avx");
+  fprintf(meta_json, "    \"linux_aesni_avx2_plus_ref_tail\": \"%s\",\n",
+          autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE ? "ref" : "linux_aesni_avx2");
+  fprintf(meta_json, "    \"mixed_effective_path\": \"ref\"\n");
+  fprintf(meta_json, "  },\n");
+  fprintf(meta_json, "  \"stabilization_params\": { \"winner_margin_pct\": %.2f, \"stability_min_run\": %zu, \"policy_min_bucket_points\": %zu },\n",
+          autotune_config->winner_margin_pct,
+          autotune_config->stability_min_run,
+          autotune_config->policy_min_bucket_points);
   fprintf(meta_json, "  \"emitted_files\": {\n");
   fprintf(meta_json, "    \"results_csv\": %s,\n",
           should_emit_benchmark_output(autotune_config->output_level, BENCH_OUTPUT_RESULTS) ? "true" : "false");
@@ -608,7 +655,7 @@ static int parse_cli_options(int argc,
 
 int main(int argc, char **argv) {
   static const size_t lengths[] = {
-    16, 32, 64, 128, 192, 256, 320, 512, 1024, 4096, 16384
+    16, 32, 64, 128, 192, 256, 320, 512, 1024, // 4096, 16384
   };
   const size_t lengths_count = sizeof(lengths) / sizeof(lengths[0]);
   const size_t warmup = 200;
@@ -751,7 +798,7 @@ int main(int argc, char **argv) {
       free(output);
       return 1;
     }
-    fprintf(summary_csv, "run_id,len,impl,scenario,effective_path,n_samples,stat_mode,ns_per_call_mean,ns_per_call_trimmed_mean,ns_per_call_p50,ns_per_call_p95,ns_per_call_p99,ns_per_byte_mean_corrected,ns_per_byte_trimmed_mean_corrected\n");
+    fprintf(summary_csv, "run_id,key_bits,len,impl,scenario,effective_path,n_samples,stat_mode,ns_per_call_mean,ns_per_call_trimmed_mean,ns_per_call_p50,ns_per_call_p95,ns_per_call_p99,ns_per_byte_mean_corrected,ns_per_byte_trimmed_mean_corrected,ns_per_call,ns_per_byte,median_ns_per_call,mean_ns_per_call,min_ns_per_call,max_ns_per_call,sample_count,warmup_count,outer_count,trim_percent,support_ok\n");
   }
 
   if (!build_benchmark_output_path(meta_json_path, sizeof(meta_json_path), &autotune_config, "run_meta.json")) {
@@ -775,7 +822,16 @@ int main(int argc, char **argv) {
     free(output);
     return 1;
   }
-  write_run_meta(meta_json, run_id, benchmark_timestamp, warmup, outer, scenario, enable_autotune, &autotune_config);
+  write_run_meta(meta_json,
+                 run_id,
+                 benchmark_timestamp,
+                 argc,
+                 argv,
+                 warmup,
+                 outer,
+                 scenario,
+                 enable_autotune,
+                 &autotune_config);
 
   {
     const aria_impl_t *impls[] = {
@@ -874,7 +930,18 @@ int main(int argc, char **argv) {
         for (size_t sample_idx = 0; sample_idx < result.samples.count; ++sample_idx) {
           write_raw_sample_row(raw_csv, run_id, len, impl->name, scenario_name, sample_idx, &result, effective_path);
         }
-        write_summary_row(summary_csv, run_id, len, impl->name, scenario_name, effective_path, result.stat_mode, &stats);
+        write_summary_row(summary_csv,
+                          run_id,
+                          keybits,
+                          len,
+                          impl->name,
+                          scenario_name,
+                          effective_path,
+                          result.stat_mode,
+                          warmup,
+                          outer,
+                          1,
+                          &stats);
         bench_result_cleanup(&result);
       }
     }

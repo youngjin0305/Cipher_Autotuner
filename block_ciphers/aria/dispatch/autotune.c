@@ -1,6 +1,7 @@
 #include "autotune.h"
 
 #include "aria_api.h"
+#include "../source/linux_kernal/common/aria-avx.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -42,6 +43,7 @@ typedef struct aria_autotune_point {
   int source_is_refined;
   char raw_winner_impl[32];
   char raw_effective_path[64];
+  char raw_second_impl[32];
   double raw_best_ns_per_call;
   double raw_second_ns_per_call;
   double raw_margin_pct;
@@ -94,6 +96,9 @@ typedef struct aria_policy_entry {
   char note[192];
   char source_phase[16];
   char basis_used[16];
+  char policy_basis_metric[32];
+  char raw_winners_in_segment[128];
+  double min_margin_pct;
 } aria_policy_entry_t;
 
 typedef struct row_vec {
@@ -546,32 +551,22 @@ static const char *normalize_impl_name(const aria_autotune_config_t *config,
   if (strcmp(effective_path, "ref_fallback") == 0) {
     return config->collapse_ref_fallback ? "ref" : impl_name;
   }
-  if (strcmp(effective_path, "linux_aesni_avx") == 0) {
-    return "linux_aesni_avx";
-  }
   if (strcmp(effective_path, "linux_aesni_avx2") == 0) {
     return "linux_aesni_avx2";
   }
-  if (strcmp(effective_path, "linux_aesni_avx_plus_ref_tail") == 0) {
-    return (config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE) ? "ref" : "linux_aesni_avx";
-  }
   if (strcmp(effective_path, "linux_aesni_avx2_plus_ref_tail") == 0) {
     return (config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE) ? "ref" : "linux_aesni_avx2";
+  }
+  if (strcmp(effective_path, "linux_aesni_avx") == 0) {
+    return "linux_aesni_avx";
+  }
+  if (strcmp(effective_path, "linux_aesni_avx_plus_ref_tail") == 0) {
+    return (config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE) ? "ref" : "linux_aesni_avx";
   }
   if (strcmp(effective_path, "mixed_effective_path") == 0) {
     return "ref";
   }
   return "ref";
-}
-
-static size_t coarse_step_for_length(const aria_autotune_config_t *config, size_t len) {
-  if (len < config->coarse_small_limit) {
-    return config->coarse_small_step;
-  }
-  if (len < config->coarse_medium_limit) {
-    return config->coarse_medium_step;
-  }
-  return config->coarse_large_step;
 }
 
 static void reset_buffers(uint8_t *input, uint8_t *output, size_t buffer_size) {
@@ -682,30 +677,80 @@ static void assign_basis_impl(const aria_autotune_config_t *config,
 }
 
 static int generate_coarse_lengths(const aria_autotune_config_t *config, size_vec_t *lengths) {
+  static const size_t structural_units[] = {
+    ARIA_BLOCK_SIZE,
+    ARIA_AESNI_PARALLEL_BLOCK_SIZE,
+    ARIA_AESNI_AVX2_PARALLEL_BLOCK_SIZE
+  };
   size_t len;
+  size_t i;
 
   if (!config || !lengths) {
     return 0;
   }
 
-  len = align_up_block(config->min_len);
-  while (len <= config->max_len) {
-    size_t step = coarse_step_for_length(config, len);
-    if (step == 0 || step % AUTOTUNE_BLOCK_SIZE != 0) {
-      return 0;
-    }
-    if (!size_vec_push_unique(lengths, len)) {
-      return 0;
-    }
-    if (config->max_len - len < step) {
-      break;
-    }
-    len += step;
+  if (!size_vec_push_unique(lengths, align_up_block(config->min_len))) {
+    return 0;
+  }
+  if (!size_vec_push_unique(lengths, align_down_block(config->max_len))) {
+    return 0;
   }
 
-  if (lengths->count == 0 || lengths->items[lengths->count - 1] != config->max_len) {
-    if (!size_vec_push_unique(lengths, config->max_len)) {
+  for (len = AUTOTUNE_BLOCK_SIZE; len <= config->max_len; len *= 2u) {
+    size_t mid;
+
+    if (len >= config->min_len && len % AUTOTUNE_BLOCK_SIZE == 0) {
+      if (!size_vec_push_unique(lengths, len)) {
+        return 0;
+      }
+    }
+
+    mid = len + (len / 2u);
+    if (mid >= config->min_len &&
+        mid <= config->max_len &&
+        mid % AUTOTUNE_BLOCK_SIZE == 0) {
+      if (!size_vec_push_unique(lengths, mid)) {
+        return 0;
+      }
+    }
+
+    if (len > config->max_len / 2u) {
+      break;
+    }
+  }
+
+  for (i = 0; i < sizeof(structural_units) / sizeof(structural_units[0]); ++i) {
+    size_t unit = structural_units[i];
+    size_t k;
+
+    if (unit == 0 || unit % AUTOTUNE_BLOCK_SIZE != 0) {
       return 0;
+    }
+
+    for (k = 1; k <= 3u; ++k) {
+      size_t base = k * unit;
+
+      if (base >= AUTOTUNE_BLOCK_SIZE) {
+        size_t before = base - AUTOTUNE_BLOCK_SIZE;
+        if (before >= config->min_len && before <= config->max_len) {
+          if (!size_vec_push_unique(lengths, before)) {
+            return 0;
+          }
+        }
+      }
+      if (base >= config->min_len && base <= config->max_len) {
+        if (!size_vec_push_unique(lengths, base)) {
+          return 0;
+        }
+      }
+      if (base <= config->max_len - AUTOTUNE_BLOCK_SIZE) {
+        size_t after = base + AUTOTUNE_BLOCK_SIZE;
+        if (after >= config->min_len && after <= config->max_len) {
+          if (!size_vec_push_unique(lengths, after)) {
+            return 0;
+          }
+        }
+      }
     }
   }
 
@@ -784,6 +829,7 @@ static int measure_points(const aria_autotune_config_t *config,
       aria_autotune_point_t point;
       size_t impl_idx;
       double raw_second = 0.0;
+      char raw_second_impl[32] = "unknown";
       double policy_second = 0.0;
       int raw_found = 0;
       int policy_class;
@@ -856,6 +902,7 @@ static int measure_points(const aria_autotune_config_t *config,
         if (!raw_found || row.median_ns_per_call < point.raw_best_ns_per_call) {
           if (raw_found) {
             raw_second = point.raw_best_ns_per_call;
+            copy_string(raw_second_impl, sizeof(raw_second_impl), point.raw_winner_impl);
           }
           point.raw_best_ns_per_call = row.median_ns_per_call;
           copy_string(point.raw_winner_impl, sizeof(point.raw_winner_impl), row.impl_name);
@@ -864,6 +911,7 @@ static int measure_points(const aria_autotune_config_t *config,
           raw_found = 1;
         } else if (raw_second <= 0.0 || row.median_ns_per_call < raw_second) {
           raw_second = row.median_ns_per_call;
+          copy_string(raw_second_impl, sizeof(raw_second_impl), row.impl_name);
         }
 
         if (normalized_class_index >= 0 &&
@@ -890,6 +938,7 @@ static int measure_points(const aria_autotune_config_t *config,
       }
 
       point.raw_second_ns_per_call = raw_second;
+      copy_string(point.raw_second_impl, sizeof(point.raw_second_impl), raw_second_impl);
       compute_margin(point.raw_best_ns_per_call, point.raw_second_ns_per_call, &point.raw_margin_pct);
       point.raw_low_margin = (point.raw_margin_pct < config->winner_margin_pct) ? 1 : 0;
 
@@ -1150,6 +1199,12 @@ static void absorb_short_runs(const aria_autotune_config_t *config,
       if (run_length < min_run) {
         const char *left_impl = (run_begin > begin) ? points[run_begin - 1].basis_impl : NULL;
         const char *right_impl = (run_end + 1 < end) ? points[run_end + 1].basis_impl : NULL;
+        double run_margin = representative_margin_for_run(config, points, run_begin, run_end);
+
+        if ((!left_impl || !right_impl) && run_margin >= config->winner_margin_pct) {
+          i = run_end + 1;
+          continue;
+        }
 
         if (left_impl && right_impl && strcmp(left_impl, right_impl) == 0) {
           absorb_run(config, points, run_begin, run_end, left_impl, tag);
@@ -1342,6 +1397,79 @@ static const char *dominant_raw_winner(const aria_autotune_point_t *points,
   return buffer;
 }
 
+static void summarize_raw_winners(const aria_autotune_point_t *points,
+                                  size_t run_begin,
+                                  size_t run_end,
+                                  char *buffer,
+                                  size_t buffer_size) {
+  size_t ref_count = 0;
+  size_t avx_count = 0;
+  size_t avx2_count = 0;
+  size_t i;
+
+  if (!points || !buffer || buffer_size == 0 || run_begin > run_end) {
+    return;
+  }
+
+  for (i = run_begin; i <= run_end; ++i) {
+    if (strcmp(points[i].raw_winner_impl, "ref") == 0) {
+      ++ref_count;
+    } else if (strcmp(points[i].raw_winner_impl, "linux_aesni_avx2") == 0) {
+      ++avx2_count;
+    } else if (strcmp(points[i].raw_winner_impl, "linux_aesni_avx") == 0) {
+      ++avx_count;
+    }
+  }
+
+  snprintf(buffer,
+           buffer_size,
+           "ref:%zu|linux_aesni_avx:%zu|linux_aesni_avx2:%zu",
+           ref_count,
+           avx_count,
+           avx2_count);
+}
+
+static double min_basis_margin_for_run(const aria_autotune_config_t *config,
+                                       const aria_autotune_point_t *points,
+                                       size_t run_begin,
+                                       size_t run_end) {
+  double min_margin = 0.0;
+  size_t i;
+
+  if (!config || !points || run_begin > run_end) {
+    return 0.0;
+  }
+
+  for (i = run_begin; i <= run_end; ++i) {
+    double margin = point_basis_margin(config, &points[i]);
+    if (i == run_begin || margin < min_margin) {
+      min_margin = margin;
+    }
+  }
+
+  return min_margin;
+}
+
+static size_t count_raw_matches_policy(const aria_autotune_point_t *points,
+                                       size_t run_begin,
+                                       size_t run_end,
+                                       const char *policy_impl) {
+  size_t count = 0;
+  size_t i;
+
+  if (!points || !policy_impl || run_begin > run_end) {
+    return 0;
+  }
+
+  for (i = run_begin; i <= run_end; ++i) {
+    if (strcmp(points[i].raw_winner_impl, policy_impl) == 0) {
+      ++count;
+    }
+  }
+
+  return count;
+}
+
 static int build_policy(const aria_autotune_config_t *config,
                         const point_vec_t *points,
                         policy_vec_t *policies) {
@@ -1381,9 +1509,16 @@ static int build_policy(const aria_autotune_config_t *config,
                     sizeof(entry.policy_chosen_impl),
                     points->items[run_begin].basis_impl);
         copy_string(entry.basis_used, sizeof(entry.basis_used), policy_basis_name(config->policy_basis));
+        copy_string(entry.policy_basis_metric, sizeof(entry.policy_basis_metric), "ns_per_call");
 
         dominant_path_or_mixed(points->items, run_begin, run_end, representative_path, sizeof(representative_path), &path_mixed);
         dominant_raw_winner(points->items, run_begin, run_end, raw_impl, sizeof(raw_impl), &raw_mixed);
+        summarize_raw_winners(points->items,
+                              run_begin,
+                              run_end,
+                              entry.raw_winners_in_segment,
+                              sizeof(entry.raw_winners_in_segment));
+        entry.min_margin_pct = min_basis_margin_for_run(config, points->items, run_begin, run_end);
         copy_string(entry.raw_chosen_impl, sizeof(entry.raw_chosen_impl), raw_impl);
         copy_string(entry.representative_effective_path,
                     sizeof(entry.representative_effective_path),
@@ -1414,6 +1549,12 @@ static int build_policy(const aria_autotune_config_t *config,
         }
         if (raw_mixed) {
           append_note(entry.note, sizeof(entry.note), "raw_winner_mixed");
+        }
+        if (count_raw_matches_policy(points->items,
+                                     run_begin,
+                                     run_end,
+                                     entry.policy_chosen_impl) * 2 < entry.bucket_points) {
+          append_note(entry.note, sizeof(entry.note), "policy_differs_from_raw_majority");
         }
         if (strcmp(entry.policy_chosen_impl, "ref") == 0 &&
             strcmp(entry.representative_effective_path, "ref_fallback") == 0) {
@@ -1532,9 +1673,9 @@ static int write_policy_csv(const char *path, const policy_vec_t *policies) {
   }
 
   fprintf(fp,
-          "key_bits,start_len,end_len,raw_chosen_impl,policy_chosen_impl,representative_effective_path,note,source_phase,basis_used,bucket_points\n");
+          "key_bits,start_len,end_len,raw_chosen_impl,policy_chosen_impl,representative_effective_path,note,source_phase,basis_used,bucket_points,policy_impl,policy_basis_metric,policy_basis_source,policy_basis,evidence_points,raw_winners_in_segment,min_margin_pct,notes\n");
   for (i = 0; i < policies->count; ++i) {
-    fprintf(fp, "%d,%zu,%zu,%s,%s,%s,%s,%s,%s,%zu\n",
+    fprintf(fp, "%d,%zu,%zu,%s,%s,%s,%s,%s,%s,%zu,%s,%s,%s,%s,%zu,%s,%.6f,%s\n",
             policies->items[i].key_bits,
             policies->items[i].start_len,
             policies->items[i].end_len,
@@ -1544,7 +1685,50 @@ static int write_policy_csv(const char *path, const policy_vec_t *policies) {
             policies->items[i].note,
             policies->items[i].source_phase,
             policies->items[i].basis_used,
-            policies->items[i].bucket_points);
+            policies->items[i].bucket_points,
+            policies->items[i].policy_chosen_impl,
+            policies->items[i].policy_basis_metric,
+            policies->items[i].source_phase,
+            policies->items[i].basis_used,
+            policies->items[i].bucket_points,
+            policies->items[i].raw_winners_in_segment,
+            policies->items[i].min_margin_pct,
+            policies->items[i].note);
+  }
+
+  fclose(fp);
+  return 1;
+}
+
+static int write_raw_best_by_length_csv(const char *path, const point_vec_t *points) {
+  FILE *fp;
+  size_t i;
+
+  if (!path || !points) {
+    return 0;
+  }
+
+  fp = fopen(path, "w");
+  if (!fp) {
+    fprintf(stderr, "autotune: failed to open %s: %s\n", path, strerror(errno));
+    return 0;
+  }
+
+  fprintf(fp,
+          "key_bits,input_len,raw_best_impl,raw_best_effective_path,metric,raw_best_value,second_best_impl,second_best_value,margin_pct,policy_basis_source\n");
+  for (i = 0; i < points->count; ++i) {
+    const aria_autotune_point_t *point = &points->items[i];
+
+    fprintf(fp, "%d,%zu,%s,%s,ns_per_call,%.6f,%s,%.6f,%.6f,%s\n",
+            point->key_bits,
+            point->length,
+            point->raw_winner_impl,
+            point->raw_effective_path,
+            point->raw_best_ns_per_call,
+            point->raw_second_impl,
+            point->raw_second_ns_per_call,
+            point->raw_margin_pct,
+            point->source_is_refined ? AUTOTUNE_PHASE_REFINED : AUTOTUNE_PHASE_COARSE);
   }
 
   fclose(fp);
@@ -1642,7 +1826,12 @@ static int write_policy_json(const char *path,
   fprintf(fp, "    \"collapse_ref_fallback\": %s,\n", config->collapse_ref_fallback ? "true" : "false");
   fprintf(fp, "    \"winner_margin_pct\": %.2f,\n", config->winner_margin_pct);
   fprintf(fp, "    \"stability_min_run\": %zu,\n", config->stability_min_run);
-  fprintf(fp, "    \"policy_min_bucket_points\": %zu\n", config->policy_min_bucket_points);
+  fprintf(fp, "    \"policy_min_bucket_points\": %zu,\n", config->policy_min_bucket_points);
+  fprintf(fp, "    \"coarse_grid_rule\": \"log_backbone_x1_x1.5_plus_structural_units_plus_boundaries\",\n");
+  fprintf(fp, "    \"coarse_grid_structural_units\": [%u, %u, %u]\n",
+          (unsigned int)ARIA_BLOCK_SIZE,
+          (unsigned int)ARIA_AESNI_PARALLEL_BLOCK_SIZE,
+          (unsigned int)ARIA_AESNI_AVX2_PARALLEL_BLOCK_SIZE);
   fprintf(fp, "  },\n");
   fprintf(fp, "  \"policy\": [\n");
 
@@ -1687,16 +1876,24 @@ static int write_policy_json(const char *path,
         }
         first_bucket = 0;
         fprintf(fp,
-                "        { \"start_len\": %zu, \"end_len\": %zu, \"raw_chosen_impl\": \"%s\", \"policy_chosen_impl\": \"%s\", \"representative_effective_path\": \"%s\", \"note\": \"%s\", \"source_phase\": \"%s\", \"basis_used\": \"%s\", \"bucket_points\": %zu }",
+                "        { \"start_len\": %zu, \"end_len\": %zu, \"raw_chosen_impl\": \"%s\", \"policy_chosen_impl\": \"%s\", \"policy_impl\": \"%s\", \"representative_effective_path\": \"%s\", \"note\": \"%s\", \"notes\": \"%s\", \"source_phase\": \"%s\", \"policy_basis_source\": \"%s\", \"basis_used\": \"%s\", \"policy_basis\": \"%s\", \"policy_basis_metric\": \"%s\", \"bucket_points\": %zu, \"evidence_points\": %zu, \"raw_winners_in_segment\": \"%s\", \"min_margin_pct\": %.6f }",
                 policies->items[i].start_len,
                 policies->items[i].end_len,
                 policies->items[i].raw_chosen_impl,
                 policies->items[i].policy_chosen_impl,
+                policies->items[i].policy_chosen_impl,
                 policies->items[i].representative_effective_path,
                 policies->items[i].note,
+                policies->items[i].note,
+                policies->items[i].source_phase,
                 policies->items[i].source_phase,
                 policies->items[i].basis_used,
-                policies->items[i].bucket_points);
+                policies->items[i].basis_used,
+                policies->items[i].policy_basis_metric,
+                policies->items[i].bucket_points,
+                policies->items[i].bucket_points,
+                policies->items[i].raw_winners_in_segment,
+                policies->items[i].min_margin_pct);
       }
       fprintf(fp, "\n");
     }
@@ -1789,6 +1986,7 @@ int aria_autotune_run(const aria_autotune_config_t *config,
   char coarse_csv[256];
   char refined_csv[256];
   char boundaries_csv[256];
+  char raw_best_csv[256];
   char policy_csv[256];
   char policy_json[256];
   int ok = 0;
@@ -1816,7 +2014,8 @@ int aria_autotune_run(const aria_autotune_config_t *config,
     return 0;
   }
 
-  if (!build_autotune_output_path(policy_csv, sizeof(policy_csv), config, "autotune_policy.csv") ||
+  if (!build_autotune_output_path(raw_best_csv, sizeof(raw_best_csv), config, "raw_best_by_length.csv") ||
+      !build_autotune_output_path(policy_csv, sizeof(policy_csv), config, "autotune_policy.csv") ||
       !build_autotune_output_path(policy_json, sizeof(policy_json), config, "autotune_policy.json")) {
     fprintf(stderr, "autotune: failed to build policy output path.\n");
     goto cleanup;
@@ -1894,6 +2093,7 @@ int aria_autotune_run(const aria_autotune_config_t *config,
        (!write_rows_csv(coarse_csv, &coarse_rows) ||
         !write_rows_csv(refined_csv, &refined_rows) ||
         !write_boundaries_csv(boundaries_csv, &boundaries))) ||
+      !write_raw_best_by_length_csv(raw_best_csv, &merged_points) ||
       !write_policy_csv(policy_csv, &policies) ||
       !write_policy_json(policy_json, config, &policies)) {
     goto cleanup;

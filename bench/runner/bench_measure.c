@@ -399,6 +399,8 @@ bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result) 
   stats.n_samples = count;
   stats.ns_per_call_mean = mean_of_samples(per_call, count);
   stats.ns_per_call_trimmed_mean = trimmed_mean_of_samples(per_call, count);
+  stats.ns_per_call_min = per_call_sorted[0];
+  stats.ns_per_call_max = per_call_sorted[count - 1];
   stats.ns_per_call_p50 = percentile_from_sorted(per_call_sorted, count, 0.50);
   stats.ns_per_call_p95 = percentile_from_sorted(per_call_sorted, count, 0.95);
   stats.ns_per_call_p99 = percentile_from_sorted(per_call_sorted, count, 0.99);

@@ -77,6 +77,7 @@ SUMMARY_DEFAULT_KEY_BITS = 128
 METRIC_SPECS = {
     "ns_byte": {
         "candidates": [
+            "ns_per_byte",
             "ns_per_byte_trimmed_mean_corrected",
             "median_ns_per_byte",
         ],
@@ -85,6 +86,7 @@ METRIC_SPECS = {
     },
     "ns_call": {
         "candidates": [
+            "ns_per_call",
             "ns_per_call_trimmed_mean_corrected",
             "ns_per_call_trimmed_mean",
             "median_ns_per_call",
@@ -111,12 +113,16 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "-i",
         "--input",
+        "--policy",
+        dest="input",
         default=str(DEFAULT_INPUT),
         help=f"Path to summary benchmark CSV (default: {DEFAULT_INPUT})",
     )
     parser.add_argument(
         "-o",
         "--output-dir",
+        "--out-dir",
+        dest="output_dir",
         default=str(DEFAULT_OUTPUT_DIR),
         help=f"Directory for figure outputs (default: {DEFAULT_OUTPUT_DIR})",
     )
@@ -133,6 +139,16 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         type=int,
         choices=[128, 192, 256],
         help="Only plot rows for the specified ARIA key size",
+    )
+    parser.add_argument(
+        "--min-len",
+        type=int,
+        help="Only plot input lengths greater than or equal to this value",
+    )
+    parser.add_argument(
+        "--max-len",
+        type=int,
+        help="Only plot input lengths less than or equal to this value",
     )
     return parser
 
@@ -286,7 +302,11 @@ def load_policy_rows(policy_path: Path) -> list[dict[str, object]]:
     """Load policy data from JSON first, then CSV as a fallback."""
     if policy_path.suffix.lower() == ".json":
         data = load_policy_json(policy_path)
-        return list(data["policy"])
+        groups = list(data["policy"])
+        for group in groups:
+            if isinstance(group, dict):
+                group["source_file"] = str(policy_path)
+        return groups
 
     fieldnames, rows = load_csv_rows(
         policy_path,
@@ -312,22 +332,29 @@ def load_policy_rows(policy_path: Path) -> list[dict[str, object]]:
             {
                 "key_bits": key_bits,
                 "basis_used": row["basis_used"],
+                "source_file": str(policy_path),
                 "raw_threshold_summary": "unavailable_from_csv",
                 "policy_threshold_summary": "unavailable_from_csv",
                 "buckets": [],
             },
         )
+        note = row.get("notes", row.get("note", ""))
+        policy_impl = row.get("policy_impl", row.get("policy_chosen_impl", ""))
+        source_phase = row.get("policy_basis_source", row.get("source_phase", ""))
         entry["buckets"].append(
             {
                 "start_len": int(row["start_len"]),
                 "end_len": int(row["end_len"]),
                 "raw_chosen_impl": row["raw_chosen_impl"],
-                "policy_chosen_impl": row["policy_chosen_impl"],
+                "policy_chosen_impl": policy_impl,
                 "representative_effective_path": row["representative_effective_path"],
-                "note": row["note"],
-                "source_phase": row["source_phase"],
-                "basis_used": row["basis_used"],
-                "bucket_points": int(row["bucket_points"]),
+                "note": note,
+                "source_phase": source_phase,
+                "basis_used": row.get("policy_basis", row["basis_used"]),
+                "bucket_points": int(row.get("evidence_points", row["bucket_points"])),
+                "policy_basis_metric": row.get("policy_basis_metric", "ns_per_call"),
+                "raw_winners_in_segment": row.get("raw_winners_in_segment", ""),
+                "min_margin_pct": row.get("min_margin_pct", ""),
             }
         )
     return [grouped[key_bits] for key_bits in sorted(grouped)]
@@ -447,6 +474,33 @@ def filter_rows_by_key_bits(
             f"no rows found for key_bits={key_bits}. "
             f"Available key_bits values: {', '.join(str(value) for value in available_key_bits(rows))}"
         )
+    return filtered
+
+
+def filter_rows_by_length_range(
+    rows: list[dict[str, str]],
+    *,
+    min_len: int | None = None,
+    max_len: int | None = None,
+    length_key: str = "len",
+) -> list[dict[str, str]]:
+    """Filter rows to an optional inclusive input-length range."""
+    filtered = []
+    for row in rows:
+        length = int(row[length_key])
+        if min_len is not None and length < min_len:
+            continue
+        if max_len is not None and length > max_len:
+            continue
+        filtered.append(row)
+
+    if not filtered:
+        bounds = []
+        if min_len is not None:
+            bounds.append(f">= {min_len}")
+        if max_len is not None:
+            bounds.append(f"<= {max_len}")
+        fail(f"no rows found for length range {' and '.join(bounds)}")
     return filtered
 
 

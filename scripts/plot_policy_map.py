@@ -29,10 +29,17 @@ def plot_policy_group(group: dict[str, object], output_dir) -> None:
         return
 
     lengths: list[int] = []
+    basis_metrics: set[str] = set()
+    basis_sources: set[str] = set()
     for bucket in buckets:
         lengths.append(int(bucket["start_len"]))
         lengths.append(int(bucket["end_len"]))
+        basis_metrics.add(str(bucket.get("policy_basis_metric", "ns_per_call")))
+        basis_sources.add(str(bucket.get("source_phase", bucket.get("policy_basis_source", ""))))
     tick_lengths = representative_ticks(sorted(set(lengths)))
+    policy_source = str(group.get("source_file", "unknown"))
+    basis_metric = ",".join(sorted(basis_metrics))
+    basis_source = ",".join(sorted(source for source in basis_sources if source)) or "unknown"
 
     configure_matplotlib()
     fig, ax = plt.subplots(figsize=(7.2, 1.9))
@@ -78,14 +85,23 @@ def plot_policy_group(group: dict[str, object], output_dir) -> None:
     ax.set_ylim(0.0, 1.0)
     ax.set_yticks([])
     ax.set_xlabel("Input length (bytes)")
-    ax.set_title(f"Autotune Policy Map ({key_bits}-bit key)")
+    ax.set_title(f"Autotune Policy Map ({key_bits}-bit key, {basis_metric})")
     style_axes(ax, y_minor_log=False)
     ax.grid(True, which="major", axis="x", color="#eef2f6", linewidth=0.7)
     ax.grid(False, axis="y")
     ax.spines["left"].set_visible(False)
     ax.legend(handles=impl_legend_handles(), loc="upper center", ncol=3, frameon=False)
+    fig.text(
+        0.5,
+        0.01,
+        f"range={min(lengths)}-{max(lengths)} bytes | source={policy_source} | policy_source={basis_source}",
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+        color="#64748b",
+    )
 
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     outputs = save_figure(fig, output_dir, f"fig_policy_key{key_bits}")
     plt.close(fig)
 
@@ -101,6 +117,8 @@ def main() -> None:
 
     input_path = resolve_repo_path(args.input)
     output_dir = resolve_repo_path(args.output_dir)
+    print(f"Policy input: {input_path}")
+    print(f"Figure output dir: {output_dir}")
     policy_groups = load_policy_rows(input_path)
 
     if args.key_bits is not None:

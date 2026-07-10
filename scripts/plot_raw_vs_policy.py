@@ -9,6 +9,9 @@ from plot_common import (
     IMPLEMENTATION_ORDER,
     DEFAULT_OUTPUT_DIR,
     configure_matplotlib,
+    filter_rows,
+    filter_rows_by_length_range,
+    load_summary_rows,
     impl_legend_handles,
     implementation_style,
     load_autotune_rows,
@@ -18,8 +21,10 @@ from plot_common import (
     region_fill_color,
     region_label,
     representative_ticks,
+    resolve_metric_column,
     resolve_repo_path,
     save_figure,
+    select_rows,
     style_axes,
     plt,
 )
@@ -30,12 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Plot raw winner regions against the final stabilized autotune policy."
     )
-    parser.add_argument("--coarse", required=True, help="Path to autotune_coarse.csv")
-    parser.add_argument("--refined", required=True, help="Path to autotune_refined.csv")
+    parser.add_argument("--summary", help="Path to summary_stats.csv")
+    parser.add_argument("--coarse", help="Path to autotune_coarse.csv")
+    parser.add_argument("--refined", help="Path to autotune_refined.csv")
     parser.add_argument("--policy", required=True, help="Path to autotune_policy.json or CSV")
     parser.add_argument(
         "-o",
         "--output-dir",
+        "--out-dir",
+        dest="output_dir",
         default=str(DEFAULT_OUTPUT_DIR),
         help=f"Directory for figure outputs (default: {DEFAULT_OUTPUT_DIR})",
     )
@@ -46,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[128, 192, 256],
         help="Key size to visualize (default: 128)",
     )
+    parser.add_argument("--run-id", help="Only use summary rows from the specified run_id")
+    parser.add_argument("--scenario", help="Only use summary rows from the specified scenario")
+    parser.add_argument("--min-len", type=int, help="Only plot summary rows at or above this length")
+    parser.add_argument("--max-len", type=int, help="Only plot summary rows at or below this length")
     return parser
 
 
@@ -81,6 +93,27 @@ def raw_winner_regions(rows: list[dict[str, str]]) -> list[tuple[float, float, s
         winners.append((length, candidates[0]["impl"]))
     if not winners:
         raise SystemExit("error: no raw winner rows were found in the supplied autotune CSVs")
+    return merge_length_regions(winners)
+
+
+def raw_winner_regions_from_summary(
+    rows: list[dict[str, str]],
+    key_bits: int,
+) -> list[tuple[float, float, str]]:
+    """Build raw winner regions directly from summary_stats.csv using ns/call."""
+    key_rows = [row for row in rows if int(row["key_bits"]) == key_bits]
+    if not key_rows:
+        raise SystemExit(f"error: no summary rows found for key_bits={key_bits}")
+
+    metric_column, _, _ = resolve_metric_column(key_rows, "ns_call")
+    winners: list[tuple[int, str]] = []
+    for length in sorted({int(row["len"]) for row in key_rows}):
+        candidates = [row for row in key_rows if int(row["len"]) == length]
+        candidates.sort(key=lambda row: float(row[metric_column]))
+        winners.append((length, candidates[0]["impl"]))
+
+    if not winners:
+        raise SystemExit("error: no raw winner rows were found in summary_stats.csv")
     return merge_length_regions(winners)
 
 
@@ -144,13 +177,34 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    coarse_rows = load_autotune_rows(resolve_repo_path(args.coarse))
-    refined_rows = load_autotune_rows(resolve_repo_path(args.refined))
     policy_groups = load_policy_rows(resolve_repo_path(args.policy))
     output_dir = resolve_repo_path(args.output_dir)
+    print(f"Policy input: {resolve_repo_path(args.policy)}")
+    if args.summary:
+        print(f"Summary input: {resolve_repo_path(args.summary)}")
+    if args.coarse:
+        print(f"Coarse input: {resolve_repo_path(args.coarse)}")
+    if args.refined:
+        print(f"Refined input: {resolve_repo_path(args.refined)}")
+    print(f"Figure output dir: {output_dir}")
 
-    merged_rows = merge_autotune_rows(coarse_rows, refined_rows, args.key_bits)
-    raw_regions = raw_winner_regions(merged_rows)
+    if args.coarse and args.refined:
+        coarse_rows = load_autotune_rows(resolve_repo_path(args.coarse))
+        refined_rows = load_autotune_rows(resolve_repo_path(args.refined))
+        merged_rows = merge_autotune_rows(coarse_rows, refined_rows, args.key_bits)
+        raw_regions = raw_winner_regions(merged_rows)
+    elif args.summary:
+        summary_rows = load_summary_rows(resolve_repo_path(args.summary))
+        summary_rows = select_rows(summary_rows, run_id=args.run_id, scenario=args.scenario)
+        summary_rows = filter_rows(summary_rows, IMPLEMENTATION_ORDER)
+        summary_rows = filter_rows_by_length_range(
+            summary_rows,
+            min_len=args.min_len,
+            max_len=args.max_len,
+        )
+        raw_regions = raw_winner_regions_from_summary(summary_rows, args.key_bits)
+    else:
+        raise SystemExit("error: provide either --summary or both --coarse and --refined")
 
     policy_group = None
     for group in policy_groups:

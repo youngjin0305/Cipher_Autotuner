@@ -1,6 +1,8 @@
 /build/
 /out/
 /figures/
+/.codex/
+.codex
 *.exe
 *.obj
 *.lib

@@ -34,7 +34,9 @@ def plot_policy_group(group: dict[str, object], output_dir) -> None:
     for bucket in buckets:
         lengths.append(int(bucket["start_len"]))
         lengths.append(int(bucket["end_len"]))
-        basis_metrics.add(str(bucket.get("policy_basis_metric", "ns_per_call")))
+        basis_metrics.add(
+            str(bucket.get("policy_basis_metric", "trimmed_mean_ns_per_call"))
+        )
         basis_sources.add(str(bucket.get("source_phase", bucket.get("policy_basis_source", ""))))
     tick_lengths = representative_ticks(sorted(set(lengths)))
     policy_source = str(group.get("source_file", "unknown"))
@@ -90,7 +92,7 @@ def plot_policy_group(group: dict[str, object], output_dir) -> None:
     ax.grid(True, which="major", axis="x", color="#eef2f6", linewidth=0.7)
     ax.grid(False, axis="y")
     ax.spines["left"].set_visible(False)
-    ax.legend(handles=impl_legend_handles(), loc="upper center", ncol=3, frameon=False)
+    ax.legend(handles=impl_legend_handles(), loc="upper center", ncol=4, frameon=False)
     fig.text(
         0.5,
         0.01,

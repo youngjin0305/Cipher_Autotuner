@@ -80,6 +80,9 @@ static size_t impl_bulk_blocks(const aria_impl_t *impl) {
   if (strcmp(impl->name, "linux_aesni_avx2") == 0) {
     return 32;
   }
+  if (strcmp(impl->name, "linux_gfni_avx512") == 0) {
+    return 64;
+  }
   return 0;
 }
 
@@ -165,11 +168,11 @@ static int run_ecb_kat_repeat_blocks(const aria_impl_t *impl,
     return -1;
   }
 
-  uint8_t inbuf[16 * 33];
-  uint8_t expbuf[16 * 33];
-  uint8_t gotbuf[16 * 33];
+  uint8_t inbuf[16 * 65];
+  uint8_t expbuf[16 * 65];
+  uint8_t gotbuf[16 * 65];
 
-  if (blocks == 0 || blocks > 33) {
+  if (blocks == 0 || blocks > 65) {
     printf("[FAIL] %s\n", name);
     printf("  unsupported block count: %zu\n", blocks);
     return -1;
@@ -218,6 +221,25 @@ static int run_impl_shape_kats(const aria_impl_t *impl,
   char name[96];
 
   snprintf(name, sizeof(name), "ECB-%d bulk-tail (%s)", keybits, impl->name);
+  if (strcmp(impl->name, "linux_gfni_avx512") == 0) {
+    static const size_t gfni_shapes[] = {16, 17, 32, 33, 64, 65};
+    for (size_t i = 0; i < sizeof(gfni_shapes) / sizeof(gfni_shapes[0]); ++i) {
+      snprintf(name,
+               sizeof(name),
+               "ECB-%d %zublk (%s)",
+               keybits,
+               gfni_shapes[i],
+               impl->name);
+      rc |= run_ecb_kat_repeat_blocks(impl,
+                                      name,
+                                      key_hex,
+                                      pt_hex,
+                                      ct_hex,
+                                      keybits,
+                                      gfni_shapes[i]);
+    }
+    return rc;
+  }
   if (bulk_blocks == 0) {
     rc |= run_ecb_kat_repeat_blocks(impl, name, key_hex, pt_hex, ct_hex, keybits, 5);
     return rc;
@@ -295,7 +317,8 @@ int main(void) {
   const aria_impl_t *impls[] = {
     &aria_ref_impl,
     &aria_linux_aesni_avx_impl,
-    &aria_linux_aesni_avx2_impl
+    &aria_linux_aesni_avx2_impl,
+    &aria_linux_gfni_avx512_impl
   };
   for (size_t i = 0; i < sizeof(impls) / sizeof(impls[0]); i++) {
     rc |= test_ecb_128_one(impls[i]);

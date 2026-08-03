@@ -16,8 +16,6 @@
  *
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include "aria_ref_core.h"
 
 typedef unsigned char Byte;
@@ -229,84 +227,3 @@ void Crypt(const Byte *p, int R, const Byte *e, Byte *c)
 	DL(c, t);
 	for (j = 0; j < 16; j++) c[j] = e[j] ^ t[j];
 }
-
-void printBlockOfLength(Byte *b, int len) {
-	int i;
-  
-	for (i=0; i<len; i++, b++) {
-		printf("%02x", *b);
-		if (i%4==3 && i<len-1) printf(" ");
-	}
-}
-
-void printBlock(Byte *b) {
-  printBlockOfLength(b, 16);
-}
-
-// void ARIA_test() {
-//   Byte rk[16*17], c[16], mk[32];
-//   Byte p[16]={0x11, 0x11, 0x11, 0x11, 0xaa, 0xaa, 0xaa, 0xaa, 
-//     0x11, 0x11, 0x11, 0x11, 0xbb, 0xbb, 0xbb, 0xbb};
-//   const Byte cryptResult[] = {
-//     0x8d, 0x14, 0x70, 0x62, 0x5f, 0x59, 0xeb, 0xac,
-//     0xb0, 0xe5, 0x5b, 0x53, 0x4b, 0x3e, 0x46, 0x2b};  
-//   int i, flag;
-  
-// 	for (i=0; i<16; i++)
-// 		mk[i]=i*0x11;
-// 	for (i=16; i<24; i++)
-// 		mk[i]=(i-16)*0x11;
-  
-//   Crypt(p, EncKeySetup(mk, rk, 192), rk, c);
-//   printf("BEGIN testing basic encryption...\n");
-//   printf("Testing whether the encryption would come out correctly, \
-// for 14-round ARIA.\n");
-//   printf("key      : "); printBlockOfLength(mk, 24); printf("\n");
-//   printf("plaintext: "); printBlock(p); printf("\n");
-//   printf("result is: "); printBlock(c); printf("\n");
-//   printf("should be: "); printBlock((Byte *)cryptResult); printf("\n");
-//   flag=0;
-//   for (i=0; i<16; i++)
-//     if (c[i]!=cryptResult[i])
-//       flag=1;
-//   if (flag==1)
-// 	  printf("The result is incorrect!\n");
-//   else
-// 	  printf("Okay.  The result is correct.\n");
-//   printf("END   testing basic encryption.\n\n");
-  
-//   for (i=0; i<32; i++)
-//     mk[i]=0;
-  
-//   for (i=0; i<16; i++)
-//     p[i]=0;
-  
-//   printf("BEGIN testing the roundtrip...\n");
-//   printf("For key size of 256 bits, starting with \
-// the zero plaintext and the zero key, let's see if \
-// we may recover the plaintext by decrypting the \
-// encrypted ciphertext.\n");
-//   EncKeySetup(mk, rk, 256);
-//   printf("plaintext : "); printBlock(p); printf("\n");
-//   Crypt(p, 16, rk, c);
-//   printf("ciphertext: "); printBlock(c); printf("\n");
-//   DecKeySetup(mk, rk, 256);
-//   Crypt(c, 16, rk, p);
-//   printf("decrypted : "); printBlock(p); printf("\n");
-//   flag=0;
-//   for (i=0; i<16; i++)
-//     if (p[i]!=0)
-//       flag=1;
-//   if (flag==1)
-// 	  printf("The result is incorrect!\n");
-//   else
-// 	  printf("Okay.  The result is correct.\n");
-//   printf("END   testing the roundtrip.\n");
-// }
-
-// int main(int argc, char **argv) {
-//   ARIA_test();
-//   return 0;
-// }
-
-

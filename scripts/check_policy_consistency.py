@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-IMPLS = ["ref", "linux_aesni_avx", "linux_aesni_avx2"]
+IMPLS = ["ref", "linux_aesni_avx", "linux_aesni_avx2", "linux_gfni_avx512"]
 EFFECTIVE_PATH_TO_IMPL = {
     "ref": "ref",
     "ref_fallback": "ref",
@@ -18,17 +18,29 @@ EFFECTIVE_PATH_TO_IMPL = {
     "linux_aesni_avx2_plus_ref_tail": "linux_aesni_avx2",
     "linux_aesni_avx": "linux_aesni_avx",
     "linux_aesni_avx_plus_ref_tail": "linux_aesni_avx",
+    "linux_gfni_avx512": "linux_gfni_avx512",
+    "linux_gfni_avx_16way": "linux_gfni_avx512",
+    "linux_gfni_avx2_32way": "linux_gfni_avx512",
+    "linux_gfni_mixed_width": "linux_gfni_avx512",
+    "linux_gfni_plus_ref_tail": "linux_gfni_avx512",
     "mixed_effective_path": "ref",
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check whether policy intervals are explainable from summary ns/call raw winners."
+        description=(
+            "Check whether policy intervals are explainable from summary "
+            "trimmed-mean raw winners."
+        )
     )
     parser.add_argument("--summary", required=True, help="Path to summary_stats.csv")
     parser.add_argument("--policy", required=True, help="Path to autotune_policy.csv")
-    parser.add_argument("--metric", default="ns_per_call", help="Summary metric column to compare")
+    parser.add_argument(
+        "--metric",
+        default="trimmed_mean_ns_per_call",
+        help="Summary metric column to compare (default: trimmed_mean_ns_per_call)",
+    )
     parser.add_argument("--run-id", help="Only use one summary run_id")
     parser.add_argument("--scenario", help="Only use one summary scenario")
     return parser.parse_args()

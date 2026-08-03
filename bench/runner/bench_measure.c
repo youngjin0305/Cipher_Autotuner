@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -196,7 +197,7 @@ static int cmp_double(const void *a, const void *b) {
   return 0;
 }
 
-static double percentile_from_sorted(const double *sorted, size_t count, double pct) {
+double bench_percentile_from_sorted(const double *sorted, size_t count, double pct) {
   double pos;
   size_t lo;
   size_t hi;
@@ -222,7 +223,7 @@ static double percentile_from_sorted(const double *sorted, size_t count, double 
   return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
 }
 
-static double mean_of_samples(const double *samples, size_t count) {
+double bench_mean_samples(const double *samples, size_t count) {
   double sum = 0.0;
   size_t i;
 
@@ -237,35 +238,52 @@ static double mean_of_samples(const double *samples, size_t count) {
   return sum / (double)count;
 }
 
-static double trimmed_mean_of_samples(const double *samples, size_t count) {
+int bench_compute_trimmed_mean(const double *samples,
+                               size_t count,
+                               double trim_ratio,
+                               size_t min_remaining,
+                               double *trimmed_mean,
+                               size_t *trim_count_each_side) {
   double *sorted;
   double sum = 0.0;
   size_t start = 0;
   size_t end = count;
   size_t i;
 
-  if (!samples || count == 0) {
-    return 0.0;
+  if (!samples || !trimmed_mean || count == 0 || !isfinite(trim_ratio) ||
+      trim_ratio < 0.0 || trim_ratio >= 0.5) {
+    return 0;
   }
 
   sorted = (double *)malloc(sizeof(double) * count);
   if (!sorted) {
-    return samples[0];
+    return 0;
   }
 
   for (i = 0; i < count; ++i) {
+    if (!isfinite(samples[i])) {
+      free(sorted);
+      return 0;
+    }
     sorted[i] = samples[i];
   }
 
   qsort(sorted, count, sizeof(double), cmp_double);
-  bench_trim_bounds(count, &start, &end);
+  if (!bench_trim_bounds(count, trim_ratio, min_remaining, &start, &end)) {
+    free(sorted);
+    return 0;
+  }
 
   for (i = start; i < end; ++i) {
     sum += sorted[i];
   }
 
+  *trimmed_mean = sum / (double)(end - start);
+  if (trim_count_each_side) {
+    *trim_count_each_side = start;
+  }
   free(sorted);
-  return sum / (double)(end - start);
+  return 1;
 }
 
 double bench_ticks_to_ns(uint64_t ticks, uint64_t freq) {
@@ -275,10 +293,17 @@ double bench_ticks_to_ns(uint64_t ticks, uint64_t freq) {
   return ((double)ticks * 1e9) / (double)freq;
 }
 
-void bench_trim_bounds(size_t count, size_t *start, size_t *end) {
-  size_t trim = (size_t)((double)count * BENCH_TRIM_RATIO);
-  if (trim * 2 >= count) {
-    trim = 0;
+int bench_trim_bounds(size_t count, double trim_ratio, size_t min_remaining,
+                      size_t *start, size_t *end) {
+  size_t trim;
+
+  if (!isfinite(trim_ratio) || trim_ratio < 0.0 || trim_ratio >= 0.5 ||
+      count < min_remaining) {
+    return 0;
+  }
+  trim = (size_t)((double)count * trim_ratio);
+  if (trim > count / 2 || count - (trim * 2) < min_remaining) {
+    return 0;
   }
 
   if (start) {
@@ -287,9 +312,11 @@ void bench_trim_bounds(size_t count, size_t *start, size_t *end) {
   if (end) {
     *end = count - trim;
   }
+  return 1;
 }
 
-static double stat_ticks(const uint64_t *samples, size_t count, stat_mode_t mode) {
+static double stat_ticks(const uint64_t *samples, size_t count, stat_mode_t mode,
+                         double trim_ratio) {
   if (count == 0) {
     return 0.0;
   }
@@ -328,7 +355,10 @@ static double stat_ticks(const uint64_t *samples, size_t count, stat_mode_t mode
 
   size_t start = 0;
   size_t end = count;
-  bench_trim_bounds(count, &start, &end);
+  if (!bench_trim_bounds(count, trim_ratio, BENCH_MIN_TRIMMED_SAMPLES, &start, &end)) {
+    free(sorted);
+    return 0.0;
+  }
   double sum = 0.0;
   for (size_t i = start; i < end; ++i) {
     sum += (double)sorted[i];
@@ -351,7 +381,8 @@ void bench_result_cleanup(bench_result_t *result) {
   result->samples.corrected_ticks = NULL;
 }
 
-bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result) {
+bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result,
+                                                  double trim_ratio) {
   bench_summary_stats_t stats;
   double *per_call = NULL;
   double *per_call_sorted = NULL;
@@ -359,6 +390,7 @@ bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result) 
   double *per_byte_sorted = NULL;
   size_t count = 0;
   size_t i;
+  double variance_sum = 0.0;
 
   memset(&stats, 0, sizeof(stats));
   if (!result || result->samples.count == 0 || result->inner == 0 || result->qpc_freq == 0) {
@@ -384,6 +416,13 @@ bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result) 
   for (i = 0; i < count; ++i) {
     const double ns_corrected = bench_ticks_to_ns(result->samples.corrected_ticks[i], result->qpc_freq);
     per_call[i] = ns_corrected / (double)result->inner;
+    if (!isfinite(per_call[i]) || per_call[i] <= 0.0) {
+      free(per_call);
+      free(per_call_sorted);
+      free(per_byte);
+      free(per_byte_sorted);
+      return stats;
+    }
     per_call_sorted[i] = per_call[i];
     if (per_byte && per_byte_sorted) {
       per_byte[i] = ns_corrected / ((double)result->inner * (double)result->len);
@@ -397,19 +436,52 @@ bench_summary_stats_t bench_compute_summary_stats(const bench_result_t *result) 
   }
 
   stats.n_samples = count;
-  stats.ns_per_call_mean = mean_of_samples(per_call, count);
-  stats.ns_per_call_trimmed_mean = trimmed_mean_of_samples(per_call, count);
+  stats.trim_ratio = trim_ratio;
+  stats.raw_mean_ns_per_call = bench_mean_samples(per_call, count);
+  if (!bench_compute_trimmed_mean(per_call,
+                                  count,
+                                  trim_ratio,
+                                  BENCH_MIN_TRIMMED_SAMPLES,
+                                  &stats.trimmed_mean_ns_per_call,
+                                  &stats.trim_count_each_side)) {
+    free(per_call);
+    free(per_call_sorted);
+    free(per_byte);
+    free(per_byte_sorted);
+    fprintf(stderr, "bench_measure: insufficient valid samples for trim_ratio=%.3f (valid=%zu).\n",
+            trim_ratio, count);
+    return stats;
+  }
   stats.ns_per_call_min = per_call_sorted[0];
   stats.ns_per_call_max = per_call_sorted[count - 1];
-  stats.ns_per_call_p50 = percentile_from_sorted(per_call_sorted, count, 0.50);
-  stats.ns_per_call_p95 = percentile_from_sorted(per_call_sorted, count, 0.95);
-  stats.ns_per_call_p99 = percentile_from_sorted(per_call_sorted, count, 0.99);
+  stats.ns_per_call_p50 = bench_percentile_from_sorted(per_call_sorted, count, 0.50);
+  stats.ns_per_call_p95 = bench_percentile_from_sorted(per_call_sorted, count, 0.95);
+  stats.ns_per_call_p99 = bench_percentile_from_sorted(per_call_sorted, count, 0.99);
+  for (i = 0; i < count; ++i) {
+    const double delta = per_call[i] - stats.raw_mean_ns_per_call;
+    variance_sum += delta * delta;
+  }
+  stats.standard_deviation_ns_per_call = sqrt(variance_sum / (double)count);
+  stats.iqr_ns_per_call = bench_percentile_from_sorted(per_call_sorted, count, 0.75) -
+                          bench_percentile_from_sorted(per_call_sorted, count, 0.25);
 
   if (per_byte && per_byte_sorted) {
-    stats.ns_per_byte_mean_corrected = mean_of_samples(per_byte, count);
-    stats.ns_per_byte_trimmed_mean_corrected = trimmed_mean_of_samples(per_byte, count);
-    stats.ns_per_byte_p50_corrected = percentile_from_sorted(per_byte_sorted, count, 0.50);
+    stats.raw_mean_ns_per_byte = bench_mean_samples(per_byte, count);
+    if (!bench_compute_trimmed_mean(per_byte,
+                                    count,
+                                    trim_ratio,
+                                    BENCH_MIN_TRIMMED_SAMPLES,
+                                    &stats.trimmed_mean_ns_per_byte,
+                                    NULL)) {
+      free(per_call);
+      free(per_call_sorted);
+      free(per_byte);
+      free(per_byte_sorted);
+      return stats;
+    }
+    stats.ns_per_byte_p50_corrected = bench_percentile_from_sorted(per_byte_sorted, count, 0.50);
   }
+  stats.valid = 1;
 
   free(per_call);
   free(per_call_sorted);
@@ -432,7 +504,8 @@ const char *bench_stat_mode_name(stat_mode_t mode) {
 }
 
 bench_result_t bench_run(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t len,
-                         size_t outer, uint64_t target_ticks, size_t inner_max, stat_mode_t mode, size_t warmup) {
+                         size_t outer, uint64_t target_ticks, size_t inner_max, stat_mode_t mode,
+                         size_t warmup, double trim_ratio) {
   bench_result_t result;
   result.len = len;
   result.inner = 1;
@@ -469,21 +542,36 @@ bench_result_t bench_run(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_
     bench_result_cleanup(&result);
     return result;
   }
-  result.samples.count = outer;
-
   result.inner = pick_inner(fn, ctx, in, out, len, target_ticks, inner_max, &result.sink);
 
-  for (size_t i = 0; i < outer; ++i) {
-    uint64_t t = measure_once(fn, ctx, in, out, len, result.inner, &result.sink);
-    uint64_t e = measure_once(empty_encrypt, ctx, in, out, len, result.inner, &result.sink);
-    result.samples.total_ticks[i] = t;
-    result.samples.empty_ticks[i] = e;
-    result.samples.corrected_ticks[i] = (t > e) ? (t - e) : 0;
+  {
+    size_t attempts = 0;
+    const size_t max_attempts = outer <= SIZE_MAX / BENCH_INVALID_SAMPLE_RETRIES
+                                    ? outer * BENCH_INVALID_SAMPLE_RETRIES
+                                    : SIZE_MAX;
+    while (result.samples.count < outer && attempts < max_attempts) {
+      const size_t i = result.samples.count;
+      uint64_t t = measure_once(fn, ctx, in, out, len, result.inner, &result.sink);
+      uint64_t e = measure_once(empty_encrypt, ctx, in, out, len, result.inner, &result.sink);
+      attempts++;
+      if (t <= e) {
+        continue;
+      }
+      result.samples.total_ticks[i] = t;
+      result.samples.empty_ticks[i] = e;
+      result.samples.corrected_ticks[i] = t - e;
+      result.samples.count++;
+    }
+  }
+  if (result.samples.count < outer) {
+    fprintf(stderr,
+            "bench_measure: only %zu/%zu valid corrected samples for len=%zu.\n",
+            result.samples.count, outer, len);
   }
 
-  double total_stat = stat_ticks(result.samples.total_ticks, outer, mode);
-  double empty_stat = stat_ticks(result.samples.empty_ticks, outer, mode);
-  double diff_stat  = stat_ticks(result.samples.corrected_ticks, outer, mode);
+  double total_stat = stat_ticks(result.samples.total_ticks, result.samples.count, mode, trim_ratio);
+  double empty_stat = stat_ticks(result.samples.empty_ticks, result.samples.count, mode, trim_ratio);
+  double diff_stat  = stat_ticks(result.samples.corrected_ticks, result.samples.count, mode, trim_ratio);
 
   result.total_ticks = (uint64_t)(total_stat + 0.5);
   result.empty_ticks = (uint64_t)(empty_stat + 0.5);
@@ -515,7 +603,8 @@ bench_result_t bench_run(aria_encrypt_fn fn, const aria_ctx_t *ctx, const uint8_
 }
 
 bench_result_t bench_run_keysetup(aria_keysetup_fn fn, aria_ctx_t *ctx, uint8_t *key, int keybits, size_t outer, uint64_t target_ticks,
-                                  size_t inner_max, stat_mode_t mode, size_t warmup) {
+                                  size_t inner_max, stat_mode_t mode, size_t warmup,
+                                  double trim_ratio) {
   bench_result_t result;
   result.len = 0;
   result.inner = 1;
@@ -552,21 +641,36 @@ bench_result_t bench_run_keysetup(aria_keysetup_fn fn, aria_ctx_t *ctx, uint8_t 
     bench_result_cleanup(&result);
     return result;
   }
-  result.samples.count = outer;
-
   result.inner = pick_inner_keysetup(fn, ctx, key, keybits, target_ticks, inner_max, &result.sink);
 
-  for (size_t i = 0; i < outer; ++i) {
-    uint64_t t = measure_keysetup_once(fn, ctx, key, keybits, result.inner, &result.sink);
-    uint64_t e = measure_keysetup_once(empty_keysetup, ctx, key, keybits, result.inner, &result.sink);
-    result.samples.total_ticks[i] = t;
-    result.samples.empty_ticks[i] = e;
-    result.samples.corrected_ticks[i] = (t > e) ? (t - e) : 0;
+  {
+    size_t attempts = 0;
+    const size_t max_attempts = outer <= SIZE_MAX / BENCH_INVALID_SAMPLE_RETRIES
+                                    ? outer * BENCH_INVALID_SAMPLE_RETRIES
+                                    : SIZE_MAX;
+    while (result.samples.count < outer && attempts < max_attempts) {
+      const size_t i = result.samples.count;
+      uint64_t t = measure_keysetup_once(fn, ctx, key, keybits, result.inner, &result.sink);
+      uint64_t e = measure_keysetup_once(empty_keysetup, ctx, key, keybits, result.inner, &result.sink);
+      attempts++;
+      if (t <= e) {
+        continue;
+      }
+      result.samples.total_ticks[i] = t;
+      result.samples.empty_ticks[i] = e;
+      result.samples.corrected_ticks[i] = t - e;
+      result.samples.count++;
+    }
+  }
+  if (result.samples.count < outer) {
+    fprintf(stderr,
+            "bench_measure: only %zu/%zu valid key-setup samples for key_bits=%d.\n",
+            result.samples.count, outer, keybits);
   }
 
-  double total_stat = stat_ticks(result.samples.total_ticks, outer, mode);
-  double empty_stat = stat_ticks(result.samples.empty_ticks, outer, mode);
-  double diff_stat  = stat_ticks(result.samples.corrected_ticks, outer, mode);
+  double total_stat = stat_ticks(result.samples.total_ticks, result.samples.count, mode, trim_ratio);
+  double empty_stat = stat_ticks(result.samples.empty_ticks, result.samples.count, mode, trim_ratio);
+  double diff_stat  = stat_ticks(result.samples.corrected_ticks, result.samples.count, mode, trim_ratio);
 
   result.total_ticks = (uint64_t)(total_stat + 0.5);
   result.empty_ticks = (uint64_t)(empty_stat + 0.5);

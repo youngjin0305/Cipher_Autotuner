@@ -4,5 +4,6 @@
 int aria_cpu_has_aesni_avx(void);
 int aria_cpu_has_avx2(void);
 int aria_cpu_has_aesni_avx2(void);
+int aria_cpu_has_gfni_avx512(void);
 
 #endif

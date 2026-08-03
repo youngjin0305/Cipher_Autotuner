@@ -240,7 +240,7 @@ def main() -> None:
         hatch_mixed=True,
     )
     axes[1].set_xlabel("Input length (bytes)")
-    axes[0].legend(handles=impl_legend_handles(), loc="upper center", ncol=3, frameon=False)
+    axes[0].legend(handles=impl_legend_handles(), loc="upper center", ncol=4, frameon=False)
 
     fig.tight_layout()
     outputs = save_figure(fig, output_dir, f"fig_raw_vs_policy_key{args.key_bits}")

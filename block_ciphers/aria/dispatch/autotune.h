@@ -17,9 +17,8 @@ typedef enum aria_autotune_tail_policy {
 } aria_autotune_tail_policy_t;
 
 typedef enum aria_autotune_profile {
-  ARIA_AUTOTUNE_PROFILE_SMOKE = 0,
-  ARIA_AUTOTUNE_PROFILE_TEST = 1,
-  ARIA_AUTOTUNE_PROFILE_FULL = 2
+  ARIA_AUTOTUNE_PROFILE_TEST = 0,
+  ARIA_AUTOTUNE_PROFILE_FULL = 1
 } aria_autotune_profile_t;
 
 typedef enum aria_output_level {
@@ -31,19 +30,14 @@ typedef enum aria_output_level {
 typedef struct aria_autotune_config {
   size_t min_len;
   size_t max_len;
-  size_t coarse_small_step;
-  size_t coarse_medium_step;
-  size_t coarse_large_step;
-  size_t coarse_small_limit;
-  size_t coarse_medium_limit;
   size_t refine_step;
   size_t refine_buffer;
   size_t coarse_iterations;
   size_t refine_iterations;
+  double trim_ratio;
   double winner_margin_pct;
   size_t stability_min_run;
   size_t policy_min_bucket_points;
-  int enable_threshold_summary;
   int collapse_ref_fallback;
   aria_autotune_policy_basis_t policy_basis;
   aria_autotune_tail_policy_t tail_policy;
@@ -52,6 +46,16 @@ typedef struct aria_autotune_config {
   const char *output_dir;
   const char *output_prefix;
 } aria_autotune_config_t;
+
+typedef struct aria_autotune_metrics {
+  double search_time_ms;
+  double end_to_end_time_ms;
+  size_t coarse_measurement_point_count;
+  size_t fine_measurement_point_count;
+  size_t autotune_candidate_measurement_count;
+  size_t exhaustive_candidate_measurement_count;
+  double measurement_reduction_percent;
+} aria_autotune_metrics_t;
 
 void aria_autotune_config_apply_profile(aria_autotune_config_t *config,
                                         aria_autotune_profile_t profile);
@@ -65,5 +69,8 @@ int aria_autotune_run(const aria_autotune_config_t *config,
                       size_t inner_max,
                       size_t warmup,
                       stat_mode_t stat_mode);
+
+double aria_autotune_last_duration_ms(void);
+const aria_autotune_metrics_t *aria_autotune_last_metrics(void);
 
 #endif

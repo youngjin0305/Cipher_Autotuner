@@ -2,6 +2,8 @@
 #include "autotune.h"
 #include "runtime_dispatch.h"
 #include "aria_api.h"
+#include "dispatch_evaluation.h"
+#include "cpu_features.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -129,11 +131,25 @@ static const char *build_type_name(void) {
 #endif
 }
 
-static const char *compiler_info(void) {
+static const char *compiler_name(void) {
 #if defined(_MSC_FULL_VER)
-  return "MSVC " BENCH_STRINGIFY(_MSC_FULL_VER);
+  return "MSVC";
 #elif defined(_MSC_VER)
   return "MSVC";
+#elif defined(__clang__)
+  return "Clang";
+#elif defined(__GNUC__)
+  return "GCC";
+#else
+  return "unknown";
+#endif
+}
+
+static const char *compiler_version(void) {
+#if defined(_MSC_FULL_VER)
+  return BENCH_STRINGIFY(_MSC_FULL_VER);
+#elif defined(_MSC_VER)
+  return BENCH_STRINGIFY(_MSC_VER);
 #elif defined(__clang_version__)
   return __clang_version__;
 #elif defined(__VERSION__)
@@ -267,7 +283,7 @@ static void write_summary_row(FILE *summary_csv,
     return;
   }
 
-  fprintf(summary_csv, "%s,%d,%zu,%s,%s,%s,%zu,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%zu,%.2f,%d\n",
+  fprintf(summary_csv, "%s,%d,%zu,%s,%s,%s,%zu,%s,%.6f,%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%d\n",
           run_id,
           key_bits,
           len,
@@ -276,23 +292,19 @@ static void write_summary_row(FILE *summary_csv,
           effective_path,
           stats->n_samples,
           bench_stat_mode_name(stat_mode),
-          stats->ns_per_call_mean,
-          stats->ns_per_call_trimmed_mean,
+          stats->trim_ratio,
+          stats->trim_count_each_side,
+          stats->raw_mean_ns_per_call,
+          stats->trimmed_mean_ns_per_call,
           stats->ns_per_call_p50,
-          stats->ns_per_call_p95,
-          stats->ns_per_call_p99,
-          stats->ns_per_byte_mean_corrected,
-          stats->ns_per_byte_trimmed_mean_corrected,
-          stats->ns_per_call_trimmed_mean,
-          stats->ns_per_byte_trimmed_mean_corrected,
-          stats->ns_per_call_p50,
-          stats->ns_per_call_mean,
+          stats->standard_deviation_ns_per_call,
+          stats->iqr_ns_per_call,
           stats->ns_per_call_min,
           stats->ns_per_call_max,
-          stats->n_samples,
+          stats->raw_mean_ns_per_byte,
+          stats->trimmed_mean_ns_per_byte,
           warmup_count,
           outer_count,
-          BENCH_TRIM_RATIO * 100.0,
           support_ok);
 }
 
@@ -306,8 +318,6 @@ static const char *autotune_tail_policy_name(aria_autotune_tail_policy_t tail_po
 
 static const char *autotune_profile_name(aria_autotune_profile_t profile) {
   switch (profile) {
-    case ARIA_AUTOTUNE_PROFILE_SMOKE:
-      return "smoke";
     case ARIA_AUTOTUNE_PROFILE_TEST:
       return "test";
     case ARIA_AUTOTUNE_PROFILE_FULL:
@@ -339,8 +349,8 @@ static void write_run_meta(FILE *meta_json,
                            size_t outer,
                            scenario_t scenario,
                            int autotune_enabled,
-                           const aria_autotune_config_t *autotune_config) {
-  size_t trim_percent = (size_t)(BENCH_TRIM_RATIO * 100.0);
+                           const aria_autotune_config_t *autotune_config,
+                           const aria_autotune_metrics_t *autotune_metrics) {
   int argi;
 
   if (!meta_json || !run_id || !timestamp || !autotune_config) {
@@ -356,16 +366,42 @@ static void write_run_meta(FILE *meta_json,
   fprintf(meta_json, "],\n");
   fprintf(meta_json, "  \"benchmark_timestamp\": \"%s\",\n", timestamp);
   fprintf(meta_json, "  \"timestamp\": \"%s\",\n", timestamp);
+  fprintf(meta_json, "  \"git_commit\": null,\n");
+  fprintf(meta_json, "  \"operating_system\": \"%s\",\n", platform_name());
   fprintf(meta_json, "  \"platform\": \"%s\",\n", platform_name());
-  fprintf(meta_json, "  \"compiler\": \"%s\",\n", compiler_info());
+  fprintf(meta_json, "  \"cpu_model\": \"unknown\",\n");
+  fprintf(meta_json, "  \"cpu_features\": { \"aesni_avx\": %s, \"aesni_avx2\": %s, \"gfni_avx512\": %s },\n",
+          aria_cpu_has_aesni_avx() ? "true" : "false",
+          aria_cpu_has_aesni_avx2() ? "true" : "false",
+          aria_cpu_has_gfni_avx512() ? "true" : "false");
+  fprintf(meta_json, "  \"compiler\": \"%s\",\n", compiler_name());
+  fprintf(meta_json, "  \"compiler_version\": \"%s\",\n", compiler_version());
+  fprintf(meta_json, "  \"compiler_flags\": \"unknown\",\n");
   fprintf(meta_json, "  \"build_type\": \"%s\",\n", build_type_name());
   fprintf(meta_json, "  \"warmup_count\": %zu,\n", warmup);
   fprintf(meta_json, "  \"outer_count\": %zu,\n", outer);
-  fprintf(meta_json, "  \"trim_ratio\": %.2f,\n", BENCH_TRIM_RATIO);
-  fprintf(meta_json, "  \"trim_percent\": %zu,\n", trim_percent);
+  fprintf(meta_json, "  \"outer_samples\": %zu,\n", outer);
+  fprintf(meta_json, "  \"inner_iterations\": \"adaptive_per_measurement\",\n");
+  fprintf(meta_json, "  \"trim_ratio\": %.6f,\n", autotune_config->trim_ratio);
+  fprintf(meta_json, "  \"trim_count_rule\": \"floor(valid_outer_samples * trim_ratio) from each side\",\n");
+  fprintf(meta_json, "  \"minimum_trimmed_samples\": %u,\n", BENCH_MIN_TRIMMED_SAMPLES);
+  fprintf(meta_json, "  \"stat_mode\": \"%s\",\n", bench_stat_mode_name(STAT_TRIMMED_MEAN));
+  fprintf(meta_json, "  \"empty_loop_correction\": \"per_outer_sample_before_trimming\",\n");
   fprintf(meta_json, "  \"scenario\": \"%s\",\n", aria_scenario_name(scenario));
   fprintf(meta_json, "  \"scenario_list\": [\"%s\"],\n", aria_scenario_name(scenario));
   fprintf(meta_json, "  \"autotune_enabled\": %s,\n", autotune_enabled ? "true" : "false");
+  if (autotune_metrics) {
+    fprintf(meta_json, "  \"autotune_search_time_ms\": %.3f,\n", autotune_metrics->search_time_ms);
+    fprintf(meta_json, "  \"autotune_end_to_end_time_ms\": %.3f,\n", autotune_metrics->end_to_end_time_ms);
+    fprintf(meta_json, "  \"coarse_measurement_point_count\": %zu,\n", autotune_metrics->coarse_measurement_point_count);
+    fprintf(meta_json, "  \"fine_measurement_point_count\": %zu,\n", autotune_metrics->fine_measurement_point_count);
+    fprintf(meta_json, "  \"autotune_candidate_measurement_count\": %zu,\n", autotune_metrics->autotune_candidate_measurement_count);
+    fprintf(meta_json, "  \"exhaustive_candidate_measurement_count\": %zu,\n", autotune_metrics->exhaustive_candidate_measurement_count);
+    fprintf(meta_json, "  \"measurement_reduction_percent\": %.6f,\n", autotune_metrics->measurement_reduction_percent);
+  } else {
+    fprintf(meta_json, "  \"autotune_search_time_ms\": null,\n");
+    fprintf(meta_json, "  \"autotune_end_to_end_time_ms\": null,\n");
+  }
   fprintf(meta_json, "  \"autotune_profile\": \"%s\",\n", autotune_profile_name(autotune_config->profile));
   fprintf(meta_json, "  \"output_level\": \"%s\",\n", output_level_name(autotune_config->output_level));
   fprintf(meta_json, "  \"output_dir\": \"%s\",\n",
@@ -373,19 +409,37 @@ static void write_run_meta(FILE *meta_json,
   fprintf(meta_json, "  \"output_prefix\": \"%s\",\n",
           autotune_config->output_prefix ? autotune_config->output_prefix : "");
   fprintf(meta_json, "  \"key_sizes\": [128, 192, 256],\n");
-  fprintf(meta_json, "  \"input_lengths\": { \"benchmark\": [16, 32, 64, 128, 192, 256, 320, 512, 1024, 4096, 16384], \"autotune_min\": %zu, \"autotune_max\": %zu },\n",
+  fprintf(meta_json, "  \"message_lengths\": [16, 32, 64, 128, 192, 256, 320, 512, 1024, 2048, 4096],\n");
+  fprintf(meta_json, "  \"min_len\": %zu,\n", autotune_config->min_len);
+  fprintf(meta_json, "  \"max_len\": %zu,\n", autotune_config->max_len);
+  fprintf(meta_json, "  \"length_step\": 16,\n");
+  fprintf(meta_json, "  \"input_lengths\": { \"benchmark\": [16, 32, 64, 128, 192, 256, 320, 512, 1024, 2048, 4096], \"autotune_min\": %zu, \"autotune_max\": %zu },\n",
           autotune_config->min_len,
           autotune_config->max_len);
   fprintf(meta_json, "  \"coarse_grid_rule\": \"log_backbone_x1_x1.5_plus_structural_units_plus_boundaries\",\n");
-  fprintf(meta_json, "  \"coarse_grid_structural_units\": [16, 256, 512],\n");
-  fprintf(meta_json, "  \"implementations\": [\"ref\", \"linux_aesni_avx\", \"linux_aesni_avx2\"],\n");
+  fprintf(meta_json, "  \"coarse_grid_structural_units\": [16, 256, 512, 1024],\n");
+  fprintf(meta_json, "  \"implementations\": [\"ref\", \"linux_aesni_avx\", \"linux_aesni_avx2\", \"linux_gfni_avx512\"],\n");
+  fprintf(meta_json, "  \"candidate_implementations\": { \"ref\": \"active\", \"linux_aesni_avx\": \"%s\", \"linux_aesni_avx2\": \"%s\", \"linux_gfni_avx512\": \"%s\" },\n",
+          aria_cpu_has_aesni_avx() ? "active" : "unsupported_cpu_feature",
+          aria_cpu_has_aesni_avx2() ? "active" : "unsupported_cpu_feature",
+          aria_cpu_has_gfni_avx512() ? "active" : "unsupported_cpu_feature");
   fprintf(meta_json, "  \"policy_basis\": \"%s\",\n", autotune_policy_basis_name(autotune_config->policy_basis));
+  fprintf(meta_json, "  \"tail_policy\": \"%s\",\n", autotune_tail_policy_name(autotune_config->tail_policy));
+  fprintf(meta_json, "  \"validation_candidate_order\": \"deterministic_rotating\",\n");
+  fprintf(meta_json, "  \"random_seed\": null,\n");
   fprintf(meta_json, "  \"normalization_rules\": {\n");
   fprintf(meta_json, "    \"ref_fallback\": \"%s\",\n", autotune_config->collapse_ref_fallback ? "ref" : "impl");
   fprintf(meta_json, "    \"linux_aesni_avx_plus_ref_tail\": \"%s\",\n",
           autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE ? "ref" : "linux_aesni_avx");
   fprintf(meta_json, "    \"linux_aesni_avx2_plus_ref_tail\": \"%s\",\n",
           autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE ? "ref" : "linux_aesni_avx2");
+  fprintf(meta_json, "    \"linux_gfni_avx_16way\": \"linux_gfni_avx512\",\n");
+  fprintf(meta_json, "    \"linux_gfni_avx2_32way\": \"linux_gfni_avx512\",\n");
+  fprintf(meta_json, "    \"linux_gfni_mixed_width\": \"linux_gfni_avx512\",\n");
+  fprintf(meta_json, "    \"linux_gfni_plus_ref_tail\": \"%s\",\n",
+          autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE
+              ? "ref"
+              : "linux_gfni_avx512");
   fprintf(meta_json, "    \"mixed_effective_path\": \"ref\"\n");
   fprintf(meta_json, "  },\n");
   fprintf(meta_json, "  \"stabilization_params\": { \"winner_margin_pct\": %.2f, \"stability_min_run\": %zu, \"policy_min_bucket_points\": %zu },\n",
@@ -416,7 +470,7 @@ static int parse_size_value(const char *option, const char *value, size_t *out) 
 
   errno = 0;
   parsed = strtoull(value, &endptr, 10);
-  if (errno != 0 || endptr == value || (endptr && *endptr != '\0')) {
+  if (errno != 0 || endptr == value || (endptr && *endptr != '\0') || parsed > SIZE_MAX) {
     fprintf(stderr, "Invalid value for %s: %s\n", option, value);
     return 0;
   }
@@ -492,7 +546,8 @@ static int parse_cli_options(int argc,
     }
 
     if ((i + 1) >= argc) {
-      continue;
+      fprintf(stderr, "Missing value for option: %s\n", argv[i]);
+      return 0;
     }
 
     if (strcmp(argv[i], "--output-level") == 0) {
@@ -515,9 +570,7 @@ static int parse_cli_options(int argc,
       continue;
     }
     if (strcmp(argv[i], "--autotune-profile") == 0) {
-      if (strcmp(argv[i + 1], "smoke") == 0) {
-        aria_autotune_config_apply_profile(autotune_config, ARIA_AUTOTUNE_PROFILE_SMOKE);
-      } else if (strcmp(argv[i + 1], "test") == 0) {
+      if (strcmp(argv[i + 1], "test") == 0) {
         aria_autotune_config_apply_profile(autotune_config, ARIA_AUTOTUNE_PROFILE_TEST);
       } else if (strcmp(argv[i + 1], "full") == 0) {
         aria_autotune_config_apply_profile(autotune_config, ARIA_AUTOTUNE_PROFILE_FULL);
@@ -537,41 +590,6 @@ static int parse_cli_options(int argc,
     }
     if (strcmp(argv[i], "--autotune-max-len") == 0) {
       if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->max_len)) {
-        return 0;
-      }
-      ++i;
-      continue;
-    }
-    if (strcmp(argv[i], "--coarse-small-step") == 0) {
-      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_small_step)) {
-        return 0;
-      }
-      ++i;
-      continue;
-    }
-    if (strcmp(argv[i], "--coarse-medium-step") == 0) {
-      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_medium_step)) {
-        return 0;
-      }
-      ++i;
-      continue;
-    }
-    if (strcmp(argv[i], "--coarse-large-step") == 0) {
-      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_large_step)) {
-        return 0;
-      }
-      ++i;
-      continue;
-    }
-    if (strcmp(argv[i], "--coarse-small-limit") == 0) {
-      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_small_limit)) {
-        return 0;
-      }
-      ++i;
-      continue;
-    }
-    if (strcmp(argv[i], "--coarse-medium-limit") == 0) {
-      if (!parse_size_value(argv[i], argv[i + 1], &autotune_config->coarse_medium_limit)) {
         return 0;
       }
       ++i;
@@ -600,6 +618,13 @@ static int parse_cli_options(int argc,
     }
     if (strcmp(argv[i], "--winner-margin-pct") == 0) {
       if (!parse_double_value(argv[i], argv[i + 1], &autotune_config->winner_margin_pct)) {
+        return 0;
+      }
+      ++i;
+      continue;
+    }
+    if (strcmp(argv[i], "--trim-ratio") == 0) {
+      if (!parse_double_value(argv[i], argv[i + 1], &autotune_config->trim_ratio)) {
         return 0;
       }
       ++i;
@@ -648,6 +673,15 @@ static int parse_cli_options(int argc,
       ++i;
       continue;
     }
+
+    fprintf(stderr, "Unknown option: %s\n", argv[i]);
+    return 0;
+  }
+
+  if (autotune_config->trim_ratio < 0.0 || autotune_config->trim_ratio >= 0.5 ||
+      autotune_config->trim_ratio != autotune_config->trim_ratio) {
+    fprintf(stderr, "Invalid --trim-ratio: must be finite and in [0, 0.5).\n");
+    return 0;
   }
 
   return 1;
@@ -655,7 +689,7 @@ static int parse_cli_options(int argc,
 
 int main(int argc, char **argv) {
   static const size_t lengths[] = {
-    16, 32, 64, 128, 192, 256, 320, 512, 1024, // 4096, 16384
+    16, 32, 64, 128, 192, 256, 320, 512, 1024, 2048, 4096
   };
   const size_t lengths_count = sizeof(lengths) / sizeof(lengths[0]);
   const size_t warmup = 200;
@@ -798,7 +832,7 @@ int main(int argc, char **argv) {
       free(output);
       return 1;
     }
-    fprintf(summary_csv, "run_id,key_bits,len,impl,scenario,effective_path,n_samples,stat_mode,ns_per_call_mean,ns_per_call_trimmed_mean,ns_per_call_p50,ns_per_call_p95,ns_per_call_p99,ns_per_byte_mean_corrected,ns_per_byte_trimmed_mean_corrected,ns_per_call,ns_per_byte,median_ns_per_call,mean_ns_per_call,min_ns_per_call,max_ns_per_call,sample_count,warmup_count,outer_count,trim_percent,support_ok\n");
+    fprintf(summary_csv, "run_id,key_bits,len,impl,scenario,effective_path,valid_outer_samples,stat_mode,trim_ratio,trim_count_each_side,raw_mean_ns_per_call,trimmed_mean_ns_per_call,median_ns_per_call,standard_deviation_ns_per_call,iqr_ns_per_call,min_ns_per_call,max_ns_per_call,raw_mean_ns_per_byte,trimmed_mean_ns_per_byte,warmup_iterations,outer_samples_requested,support_ok\n");
   }
 
   if (!build_benchmark_output_path(meta_json_path, sizeof(meta_json_path), &autotune_config, "run_meta.json")) {
@@ -831,13 +865,15 @@ int main(int argc, char **argv) {
                  outer,
                  scenario,
                  enable_autotune,
-                 &autotune_config);
+                 &autotune_config,
+                 NULL);
 
   {
     const aria_impl_t *impls[] = {
       &aria_ref_impl,
       &aria_linux_aesni_avx_impl,
-      &aria_linux_aesni_avx2_impl
+      &aria_linux_aesni_avx2_impl,
+      &aria_linux_gfni_avx512_impl
     };
     const size_t impls_count = sizeof(impls) / sizeof(impls[0]);
     uint64_t final_sink = 0;
@@ -860,7 +896,8 @@ int main(int argc, char **argv) {
                                                           target_ticks,
                                                           inner_max,
                                                           stat_mode,
-                                                          warmup);
+                                                          warmup,
+                                                          autotune_config.trim_ratio);
       final_sink ^= keysetup_result.sink;
       if (key_csv) {
         fprintf(key_csv, "%d,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%s,%llu,%s\n",
@@ -903,8 +940,10 @@ int main(int argc, char **argv) {
                                           target_ticks,
                                           inner_max,
                                           stat_mode,
-                                          warmup);
-        bench_summary_stats_t stats = bench_compute_summary_stats(&result);
+                                          warmup,
+                                          autotune_config.trim_ratio);
+        bench_summary_stats_t stats = bench_compute_summary_stats(&result,
+                                                                  autotune_config.trim_ratio);
         final_sink ^= result.sink;
 
         if (csv) {
@@ -976,6 +1015,40 @@ int main(int argc, char **argv) {
                              stat_mode)) {
         fprintf(stderr, "Failed to complete autotune run.\n");
         exit_code = 1;
+      } else if (!aria_run_dispatch_evaluation(&autotune_config,
+                                                input,
+                                                output,
+                                                buffer_size,
+                                                target_ticks,
+                                                inner_max,
+                                                warmup,
+                                                outer,
+                                                stat_mode,
+                                                aria_autotune_last_duration_ms(),
+                                                scenario)) {
+        fprintf(stderr, "Failed to complete dispatch evaluation.\n");
+        exit_code = 1;
+      }
+    }
+
+    if (enable_autotune && aria_policy_count() > 0) {
+      meta_json = fopen(meta_json_path, "w");
+      if (!meta_json) {
+        fprintf(stderr, "Failed to update %s with autotune metrics.\n", meta_json_path);
+        exit_code = 1;
+      } else {
+        write_run_meta(meta_json,
+                       run_id,
+                       benchmark_timestamp,
+                       argc,
+                       argv,
+                       warmup,
+                       outer,
+                       scenario,
+                       enable_autotune,
+                       &autotune_config,
+                       aria_autotune_last_metrics());
+        close_file_if_open(&meta_json);
       }
     }
 

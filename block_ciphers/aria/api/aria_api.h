@@ -36,5 +36,6 @@ void aria_ref_init(aria_ctx_t *ctx, const uint8_t *key, int keybits);
 extern const aria_impl_t aria_ref_impl;
 extern const aria_impl_t aria_linux_aesni_avx_impl;
 extern const aria_impl_t aria_linux_aesni_avx2_impl;
+extern const aria_impl_t aria_linux_gfni_avx512_impl;
 
 #endif

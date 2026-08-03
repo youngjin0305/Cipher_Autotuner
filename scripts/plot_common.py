@@ -26,16 +26,23 @@ DEFAULT_OUTPUT_DIR = Path("figures")
 DEFAULT_POLICY_INPUT = Path("out/autotune_policy.json")
 DEFAULT_COARSE_INPUT = Path("out/autotune_coarse.csv")
 DEFAULT_REFINED_INPUT = Path("out/autotune_refined.csv")
-IMPLEMENTATION_ORDER = ["ref", "linux_aesni_avx", "linux_aesni_avx2"]
+IMPLEMENTATION_ORDER = [
+    "ref",
+    "linux_aesni_avx",
+    "linux_aesni_avx2",
+    "linux_gfni_avx512",
+]
 DISPLAY_LABELS = {
     "ref": "Ref",
     "linux_aesni_avx": "AES-NI+AVX",
     "linux_aesni_avx2": "AES-NI+AVX2",
+    "linux_gfni_avx512": "GFNI+AVX-512",
 }
 REGION_LABELS = {
     "ref": "Ref",
     "linux_aesni_avx": "AVX",
     "linux_aesni_avx2": "AVX2",
+    "linux_gfni_avx512": "GFNI/AVX-512",
 }
 PLOT_STYLES = {
     "ref": {
@@ -62,11 +69,20 @@ PLOT_STYLES = {
         "markeredgecolor": "#029E73",
         "markeredgewidth": 0.0,
     },
+    "linux_gfni_avx512": {
+        "color": "#CC78BC",
+        "linestyle": "-",
+        "marker": "o",
+        "markerfacecolor": "#CC78BC",
+        "markeredgecolor": "#CC78BC",
+        "markeredgewidth": 0.0,
+    },
 }
 REGION_FILL_COLORS = {
     "ref": "#dbeafe",
     "linux_aesni_avx": "#fee2e2",
     "linux_aesni_avx2": "#dcfce7",
+    "linux_gfni_avx512": "#f3e8ff",
 }
 POLICY_HATCH = {
     "plain": None,
@@ -77,6 +93,7 @@ SUMMARY_DEFAULT_KEY_BITS = 128
 METRIC_SPECS = {
     "ns_byte": {
         "candidates": [
+            "trimmed_mean_ns_per_byte",
             "ns_per_byte",
             "ns_per_byte_trimmed_mean_corrected",
             "median_ns_per_byte",
@@ -86,6 +103,7 @@ METRIC_SPECS = {
     },
     "ns_call": {
         "candidates": [
+            "trimmed_mean_ns_per_call",
             "ns_per_call",
             "ns_per_call_trimmed_mean_corrected",
             "ns_per_call_trimmed_mean",
@@ -103,6 +121,11 @@ EFFECTIVE_PATH_TO_IMPL = {
     "linux_aesni_avx_plus_ref_tail": "linux_aesni_avx",
     "linux_aesni_avx2": "linux_aesni_avx2",
     "linux_aesni_avx2_plus_ref_tail": "linux_aesni_avx2",
+    "linux_gfni_avx512": "linux_gfni_avx512",
+    "linux_gfni_avx_16way": "linux_gfni_avx512",
+    "linux_gfni_avx2_32way": "linux_gfni_avx512",
+    "linux_gfni_mixed_width": "linux_gfni_avx512",
+    "linux_gfni_plus_ref_tail": "linux_gfni_avx512",
     "mixed_effective_path": "ref",
 }
 
@@ -352,7 +375,9 @@ def load_policy_rows(policy_path: Path) -> list[dict[str, object]]:
                 "source_phase": source_phase,
                 "basis_used": row.get("policy_basis", row["basis_used"]),
                 "bucket_points": int(row.get("evidence_points", row["bucket_points"])),
-                "policy_basis_metric": row.get("policy_basis_metric", "ns_per_call"),
+                "policy_basis_metric": row.get(
+                    "policy_basis_metric", "trimmed_mean_ns_per_call"
+                ),
                 "raw_winners_in_segment": row.get("raw_winners_in_segment", ""),
                 "min_margin_pct": row.get("min_margin_pct", ""),
             }
@@ -370,8 +395,8 @@ def load_autotune_rows(csv_path: Path) -> list[dict[str, str]]:
             "impl",
             "effective_path",
             "normalized_impl",
-            "median_ns_per_call",
-            "median_ns_per_byte",
+            "trimmed_mean_ns_per_call",
+            "trimmed_mean_ns_per_byte",
             "is_raw_winner",
             "is_policy_winner",
             "phase",
@@ -686,17 +711,16 @@ def ensure_output_dir(output_dir: Path) -> None:
 
 
 def save_figure(fig: plt.Figure, output_dir: Path, stem: str) -> list[Path]:
-    """Save the figure as both PNG and PDF."""
+    """Save one publication-resolution PNG figure."""
     ensure_output_dir(output_dir)
 
-    outputs = [output_dir / f"{stem}.png", output_dir / f"{stem}.pdf"]
-    for output_path in outputs:
-        try:
-            fig.savefig(output_path, dpi=300, bbox_inches="tight")
-        except OSError as exc:
-            fail(f"failed to write figure {output_path}: {exc}")
+    output_path = output_dir / f"{stem}.png"
+    try:
+        fig.savefig(output_path, dpi=300, bbox_inches="tight", format="png")
+    except OSError as exc:
+        fail(f"failed to write figure {output_path}: {exc}")
 
-    return outputs
+    return [output_path]
 
 
 def configure_matplotlib() -> None:

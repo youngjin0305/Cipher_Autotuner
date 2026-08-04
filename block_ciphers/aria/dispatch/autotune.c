@@ -31,6 +31,11 @@ typedef struct aria_autotune_row {
   size_t length;
   char impl_name[32];
   char effective_path[64];
+  char execution_path[160];
+  size_t gfni_64way_chunk_count;
+  size_t avx2_32way_chunk_count;
+  size_t avx_16way_chunk_count;
+  size_t ref_tail_block_count;
   char normalized_impl[32];
   double trimmed_mean_ns_per_call;
   double trimmed_mean_ns_per_byte;
@@ -559,6 +564,60 @@ static const char *effective_path_for_impl_name(const char *impl_name, size_t le
   return impl->name;
 }
 
+static aria_execution_path_t execution_path_for_impl(const aria_impl_t *impl, size_t len) {
+  aria_execution_path_t path = {0, 0, 0, 0};
+
+  if (impl && impl->execution_path) {
+    impl->execution_path(len, &path);
+  }
+  return path;
+}
+
+static void format_execution_path(const aria_execution_path_t *path,
+                                  char *buffer,
+                                  size_t buffer_size) {
+  static const char *labels[] = {
+    "gfni_64way", "avx2_32way", "avx_16way", "ref"
+  };
+  size_t counts[4];
+  size_t used = 0;
+  size_t i;
+
+  if (!path || !buffer || buffer_size == 0) {
+    return;
+  }
+  counts[0] = path->gfni_64way_chunk_count;
+  counts[1] = path->avx2_32way_chunk_count;
+  counts[2] = path->avx_16way_chunk_count;
+  counts[3] = path->ref_tail_block_count;
+  buffer[0] = '\0';
+
+  for (i = 0; i < sizeof(counts) / sizeof(counts[0]); ++i) {
+    int written;
+    if (counts[i] == 0 || used >= buffer_size) {
+      continue;
+    }
+    written = snprintf(buffer + used,
+                       buffer_size - used,
+                       "%s%s*%zu",
+                       used == 0 ? "" : " + ",
+                       labels[i],
+                       counts[i]);
+    if (written < 0) {
+      buffer[0] = '\0';
+      return;
+    }
+    if ((size_t)written >= buffer_size - used) {
+      used = buffer_size - 1;
+      break;
+    }
+    used += (size_t)written;
+  }
+  if (used == 0) {
+    snprintf(buffer, buffer_size, "none");
+  }
+}
+
 static const char *normalize_impl_name(const aria_autotune_config_t *config,
                                        const char *impl_name,
                                        const char *effective_path) {
@@ -576,7 +635,11 @@ static const char *normalize_impl_name(const aria_autotune_config_t *config,
   if (strcmp(effective_path, "linux_aesni_avx2") == 0) {
     return "linux_aesni_avx2";
   }
-  if (strcmp(effective_path, "linux_aesni_avx2_plus_ref_tail") == 0) {
+  if (strcmp(effective_path, "linux_aesni_avx2_plus_avx_tail") == 0) {
+    return "linux_aesni_avx2";
+  }
+  if (strcmp(effective_path, "linux_aesni_avx2_plus_ref_tail") == 0 ||
+      strcmp(effective_path, "linux_aesni_avx2_plus_avx_ref_tail") == 0) {
     return (config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE) ? "ref" : "linux_aesni_avx2";
   }
   if (strcmp(effective_path, "linux_aesni_avx") == 0) {
@@ -758,12 +821,16 @@ static int generate_coarse_lengths(const aria_autotune_config_t *config, size_ve
   for (i = 0; i < sizeof(structural_units) / sizeof(structural_units[0]); ++i) {
     size_t unit = structural_units[i];
     size_t k;
+    size_t max_multiplier;
 
     if (unit == 0 || unit % AUTOTUNE_BLOCK_SIZE != 0) {
       return 0;
     }
 
-    for (k = 1; k <= 3u; ++k) {
+    max_multiplier = (unit == AUTOTUNE_BLOCK_SIZE)
+                         ? 3u
+                         : config->max_len / unit;
+    for (k = 1; k <= max_multiplier; ++k) {
       size_t base = k * unit;
 
       if (base >= AUTOTUNE_BLOCK_SIZE) {
@@ -892,6 +959,7 @@ static int measure_points(const aria_autotune_config_t *config,
         bench_result_t result;
         bench_summary_stats_t stats;
         aria_autotune_row_t row;
+        aria_execution_path_t execution_path;
         const char *effective_path;
         const char *normalized_impl;
         int normalized_class_index;
@@ -924,6 +992,7 @@ static int measure_points(const aria_autotune_config_t *config,
         }
 
         effective_path = effective_path_for_impl_name(impl->name, point.length);
+        execution_path = execution_path_for_impl(impl, point.length);
         normalized_impl = normalize_impl_name(config, impl->name, effective_path);
         normalized_class_index = class_index_from_impl_name(normalized_impl);
 
@@ -932,6 +1001,11 @@ static int measure_points(const aria_autotune_config_t *config,
         row.length = point.length;
         copy_string(row.impl_name, sizeof(row.impl_name), impl->name);
         copy_string(row.effective_path, sizeof(row.effective_path), effective_path);
+        format_execution_path(&execution_path, row.execution_path, sizeof(row.execution_path));
+        row.gfni_64way_chunk_count = execution_path.gfni_64way_chunk_count;
+        row.avx2_32way_chunk_count = execution_path.avx2_32way_chunk_count;
+        row.avx_16way_chunk_count = execution_path.avx_16way_chunk_count;
+        row.ref_tail_block_count = execution_path.ref_tail_block_count;
         copy_string(row.normalized_impl, sizeof(row.normalized_impl), normalized_impl);
         row.trimmed_mean_ns_per_call = stats.trimmed_mean_ns_per_call;
         row.trimmed_mean_ns_per_byte = stats.trimmed_mean_ns_per_byte;
@@ -1031,7 +1105,7 @@ static int measure_points(const aria_autotune_config_t *config,
           strcmp(point.policy_winner_impl, "ref") == 0) {
         append_note(point.note, sizeof(point.note), "ref_fallback_collapsed_to_ref");
       }
-      if (strstr(point.policy_effective_path, "plus_ref_tail") != NULL) {
+      if (strstr(point.policy_effective_path, "ref_tail") != NULL) {
         append_note(point.note, sizeof(point.note), "plus_ref_tail_observed");
       }
 
@@ -1591,7 +1665,7 @@ static int build_policy(const aria_autotune_config_t *config,
             strcmp(entry.representative_effective_path, "ref_fallback") == 0) {
           append_note(entry.note, sizeof(entry.note), "collapsed_ref_fallback");
         }
-        if (strstr(entry.representative_effective_path, "plus_ref_tail") != NULL) {
+        if (strstr(entry.representative_effective_path, "ref_tail") != NULL) {
           append_note(entry.note, sizeof(entry.note), "plus_ref_tail_bucket");
         }
         if (entry.note[0] == '\0') {
@@ -1802,7 +1876,7 @@ static int validate_policy_against_full_search(const aria_autotune_config_t *con
     goto cleanup;
   }
   fprintf(detail,
-          "key_bits,message_length,policy_selected_implementation_raw,policy_selected_implementation_normalized,reference_winner_raw,reference_winner_normalized,exact_match,policy_trimmed_mean_ns_per_call,reference_winner_trimmed_mean_ns_per_call,policy_regret_percent,within_1_percent,within_3_percent,ref_trimmed_mean_ns_per_call,linux_aesni_avx_trimmed_mean_ns_per_call,linux_aesni_avx2_trimmed_mean_ns_per_call,linux_gfni_avx512_trimmed_mean_ns_per_call\n");
+          "key_bits,message_length,avx2_chunk_count,avx_chunk_count,ref_tail_block_count,avx2_effective_path,avx2_execution_path,policy_selected_implementation_raw,policy_selected_implementation_normalized,reference_winner_raw,reference_winner_normalized,exact_match,policy_trimmed_mean_ns_per_call,reference_winner_trimmed_mean_ns_per_call,policy_regret_percent,within_1_percent,within_3_percent,ref_trimmed_mean_ns_per_call,linux_aesni_avx_trimmed_mean_ns_per_call,linux_aesni_avx2_trimmed_mean_ns_per_call,linux_gfni_avx512_trimmed_mean_ns_per_call\n");
   fprintf(summary,
           "key_bits,validation_point_count,exact_policy_match_accuracy_percent,within_1_percent_accuracy,within_3_percent_accuracy,mean_policy_regret_percent,median_policy_regret_percent,p95_policy_regret_percent,max_policy_regret_percent,mean_symmetric_boundary_distance_bytes,policy_boundary_count,reference_boundary_count,mismatched_point_count,mismatched_interval_count,longest_mismatched_interval_bytes,mismatched_ranges\n");
 
@@ -1831,6 +1905,8 @@ static int validate_policy_against_full_search(const aria_autotune_config_t *con
       double reference_time;
       double regret;
       int match;
+      aria_execution_path_t avx2_execution_path;
+      char avx2_execution_path_text[160];
 
       if (point->key_bits != key_bits) {
         continue;
@@ -1839,6 +1915,11 @@ static int validate_policy_against_full_search(const aria_autotune_config_t *con
       if (!policy_impl) {
         goto cleanup;
       }
+      avx2_execution_path = execution_path_for_impl(&aria_linux_aesni_avx2_impl,
+                                                    point->length);
+      format_execution_path(&avx2_execution_path,
+                            avx2_execution_path_text,
+                            sizeof(avx2_execution_path_text));
       policy_normalized = normalize_impl_name(config,
                                               policy_impl->name,
                                               effective_path_for_impl_name(policy_impl->name, point->length));
@@ -1871,9 +1952,14 @@ static int validate_policy_against_full_search(const aria_autotune_config_t *con
       if (policy_time <= reference_time * 1.03) {
         within_3_count++;
       }
-      fprintf(detail, "%d,%zu,%s,%s,%s,%s,%d,%.6f,%.6f,%.9f,%d,%d,%.6f,%.6f,%.6f,%.6f\n",
+      fprintf(detail, "%d,%zu,%zu,%zu,%zu,%s,%s,%s,%s,%s,%s,%d,%.6f,%.6f,%.9f,%d,%d,%.6f,%.6f,%.6f,%.6f\n",
               key_bits,
               point->length,
+              avx2_execution_path.avx2_32way_chunk_count,
+              avx2_execution_path.avx_16way_chunk_count,
+              avx2_execution_path.ref_tail_block_count,
+              effective_path_for_impl_name("linux_aesni_avx2", point->length),
+              avx2_execution_path_text,
               policy_impl->name,
               policy_normalized,
               point->raw_winner_impl,
@@ -2056,13 +2142,18 @@ static int write_rows_csv(const char *path, const row_vec_t *rows) {
   }
 
   fprintf(fp,
-          "key_bits,length,impl,effective_path,normalized_impl,trimmed_mean_ns_per_call,trimmed_mean_ns_per_byte,raw_mean_ns_per_call,median_ns_per_call,sample_count,is_raw_winner,is_policy_winner,phase\n");
+          "key_bits,length,impl,effective_path,gfni_64way_chunk_count,avx2_chunk_count,avx_chunk_count,ref_tail_block_count,execution_path,normalized_impl,trimmed_mean_ns_per_call,trimmed_mean_ns_per_byte,raw_mean_ns_per_call,median_ns_per_call,sample_count,is_raw_winner,is_policy_winner,phase\n");
   for (i = 0; i < rows->count; ++i) {
-    fprintf(fp, "%d,%zu,%s,%s,%s,%.6f,%.6f,%.6f,%.6f,%zu,%d,%d,%s\n",
+    fprintf(fp, "%d,%zu,%s,%s,%zu,%zu,%zu,%zu,%s,%s,%.6f,%.6f,%.6f,%.6f,%zu,%d,%d,%s\n",
             rows->items[i].key_bits,
             rows->items[i].length,
             rows->items[i].impl_name,
             rows->items[i].effective_path,
+            rows->items[i].gfni_64way_chunk_count,
+            rows->items[i].avx2_32way_chunk_count,
+            rows->items[i].avx_16way_chunk_count,
+            rows->items[i].ref_tail_block_count,
+            rows->items[i].execution_path,
             rows->items[i].normalized_impl,
             rows->items[i].trimmed_mean_ns_per_call,
             rows->items[i].trimmed_mean_ns_per_byte,
@@ -2233,6 +2324,33 @@ static int write_boundaries_csv(const char *path, const boundary_vec_t *boundari
             boundaries->items[i].note);
   }
 
+  fclose(fp);
+  return 1;
+}
+
+static int write_scan_points_csv(const char *path,
+                                 const point_vec_t *coarse_points,
+                                 const point_vec_t *refined_points) {
+  FILE *fp;
+  size_t i;
+
+  if (!path || !coarse_points || !refined_points) {
+    return 0;
+  }
+  fp = fopen(path, "w");
+  if (!fp) {
+    fprintf(stderr, "autotune: failed to open %s: %s\n", path, strerror(errno));
+    return 0;
+  }
+  fprintf(fp, "key_bits,input_len,phase\n");
+  for (i = 0; i < coarse_points->count; ++i) {
+    fprintf(fp, "%d,%zu,%s\n", coarse_points->items[i].key_bits,
+            coarse_points->items[i].length, AUTOTUNE_PHASE_COARSE);
+  }
+  for (i = 0; i < refined_points->count; ++i) {
+    fprintf(fp, "%d,%zu,%s\n", refined_points->items[i].key_bits,
+            refined_points->items[i].length, AUTOTUNE_PHASE_REFINED);
+  }
   fclose(fp);
   return 1;
 }
@@ -2428,10 +2546,11 @@ static int write_policy_json(const char *path,
   fprintf(fp, "    \"stability_min_run\": %zu,\n", config->stability_min_run);
   fprintf(fp, "    \"policy_min_bucket_points\": %zu,\n", config->policy_min_bucket_points);
   fprintf(fp, "    \"coarse_grid_rule\": \"log_backbone_x1_x1.5_plus_structural_units_plus_boundaries\",\n");
-  fprintf(fp, "    \"coarse_grid_structural_units\": [%u, %u, %u]\n",
+  fprintf(fp, "    \"coarse_grid_structural_units\": [%u, %u, %u, %u]\n",
           (unsigned int)ARIA_BLOCK_SIZE,
           (unsigned int)ARIA_AESNI_PARALLEL_BLOCK_SIZE,
-          (unsigned int)ARIA_AESNI_AVX2_PARALLEL_BLOCK_SIZE);
+          (unsigned int)ARIA_AESNI_AVX2_PARALLEL_BLOCK_SIZE,
+          (unsigned int)ARIA_GFNI_AVX512_PARALLEL_BLOCK_SIZE);
   fprintf(fp, "  },\n");
   fprintf(fp, "  \"policy\": [\n");
 
@@ -2575,6 +2694,7 @@ int aria_autotune_run(const aria_autotune_config_t *config,
   char coarse_csv[256];
   char refined_csv[256];
   char boundaries_csv[256];
+  char scan_points_csv[256];
   char raw_best_csv[256];
   char policy_csv[256];
   char policy_json[256];
@@ -2626,6 +2746,7 @@ int aria_autotune_run(const aria_autotune_config_t *config,
   }
 
   if (!build_autotune_output_path(raw_best_csv, sizeof(raw_best_csv), config, "raw_best_by_length.csv") ||
+      !build_autotune_output_path(scan_points_csv, sizeof(scan_points_csv), config, "autotune_scan_points.csv") ||
       !build_autotune_output_path(policy_csv, sizeof(policy_csv), config, "autotune_policy.csv") ||
       !build_autotune_output_path(policy_json, sizeof(policy_json), config, "autotune_policy.json") ||
       !build_autotune_output_path(metrics_csv, sizeof(metrics_csv), config, "autotune_metrics.csv")) {
@@ -2715,6 +2836,7 @@ int aria_autotune_run(const aria_autotune_config_t *config,
        (!write_rows_csv(coarse_csv, &coarse_rows) ||
         !write_rows_csv(refined_csv, &refined_rows) ||
         !write_boundaries_csv(boundaries_csv, &boundaries))) ||
+      !write_scan_points_csv(scan_points_csv, &coarse_points, &refined_points) ||
       !write_raw_best_by_length_csv(raw_best_csv, &merged_points) ||
       !write_policy_csv(policy_csv, &policies) ||
       !write_policy_json(policy_json, config, &policies)) {

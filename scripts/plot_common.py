@@ -120,7 +120,9 @@ EFFECTIVE_PATH_TO_IMPL = {
     "linux_aesni_avx": "linux_aesni_avx",
     "linux_aesni_avx_plus_ref_tail": "linux_aesni_avx",
     "linux_aesni_avx2": "linux_aesni_avx2",
+    "linux_aesni_avx2_plus_avx_tail": "linux_aesni_avx2",
     "linux_aesni_avx2_plus_ref_tail": "linux_aesni_avx2",
+    "linux_aesni_avx2_plus_avx_ref_tail": "linux_aesni_avx2",
     "linux_gfni_avx512": "linux_gfni_avx512",
     "linux_gfni_avx_16way": "linux_gfni_avx512",
     "linux_gfni_avx2_32way": "linux_gfni_avx512",
@@ -655,10 +657,10 @@ def policy_note_is_mixed(note: str, effective_path: str) -> bool:
     return "mixed_effective_path" in note or effective_path == "mixed_effective_path"
 
 
-def impl_legend_handles() -> list[Patch]:
+def impl_legend_handles(implementations: list[str] | None = None) -> list[Patch]:
     """Return a consistent categorical legend for policy-style plots."""
     handles: list[Patch] = []
-    for impl in IMPLEMENTATION_ORDER:
+    for impl in implementations or IMPLEMENTATION_ORDER:
         handles.append(
             Patch(
                 facecolor=region_fill_color(impl),

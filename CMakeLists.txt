@@ -71,7 +71,11 @@ target_include_directories(aria_linux_aesni_avx2 PRIVATE
   ${CMAKE_SOURCE_DIR}/block_ciphers/aria/dispatch
   ${CMAKE_SOURCE_DIR}/block_ciphers/aria/source/linux_kernal/common
 )
-target_link_libraries(aria_linux_aesni_avx2 PRIVATE aria_ref aria_cpu_features)
+target_link_libraries(aria_linux_aesni_avx2 PRIVATE
+  aria_ref
+  aria_cpu_features
+  aria_linux_aesni_avx
+)
 
 add_library(aria_linux_gfni_avx512 STATIC
   block_ciphers/aria/impl/linux_gfni_avx512/aria_linux_gfni_avx512.c

@@ -51,8 +51,10 @@ ctest --test-dir build --output-on-failure
 ./build/bench_runner --autotune --autotune-profile "$profile" --output-dir "$out_dir" --output-level "$output_level"
 
 fig_dir="$out_dir/figures"
-python3 scripts/plot_ns_per_byte.py --input "$out_dir/summary_stats.csv" --out-dir "$fig_dir" --max-len "$plot_max_len" --key-bits 128
-python3 scripts/plot_raw_vs_policy.py --summary "$out_dir/summary_stats.csv" --policy "$out_dir/autotune_policy.csv" --out-dir "$fig_dir" --max-len "$plot_max_len" --key-bits 128
+python3 scripts/plot_ns_per_byte.py --validation "$out_dir/policy_validation.csv" --out-dir "$fig_dir" --max-len "$plot_max_len" --key-bits 128
+python3 scripts/plot_raw_vs_policy.py --raw-best "$out_dir/raw_best_by_length.csv" --policy "$out_dir/autotune_policy.csv" --out-dir "$fig_dir" --max-len "$plot_max_len" --key-bits 128
+python3 scripts/plot_policy_comparison.py --evaluation "$out_dir/dispatch_evaluation.csv" --policy "$out_dir/autotune_policy.csv" --run-meta "$out_dir/run_meta.json" --out-dir "$fig_dir" --key-bits 128
+python3 scripts/plot_scan_coverage.py --scan-points "$out_dir/autotune_scan_points.csv" --out-dir "$fig_dir"
 python3 scripts/plot_framework_evaluation.py --evaluation-summary "$out_dir/dispatch_evaluation_summary.csv" --validation-summary "$out_dir/policy_validation_summary.csv" --autotune-metrics "$out_dir/autotune_metrics.csv" --out-dir "$fig_dir"
 
 echo "Generated data files:"

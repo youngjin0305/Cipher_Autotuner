@@ -15,6 +15,13 @@ static const char *aria_ref_effective_path(size_t len)
   return "ref";
 }
 
+static void aria_ref_execution_path(size_t len, aria_execution_path_t *path)
+{
+  if (!path) return;
+  memset(path, 0, sizeof(*path));
+  path->ref_tail_block_count = len / ARIA_BLOCK_SIZE;
+}
+
 void aria_ref_init(aria_ctx_t *ctx, const uint8_t *key, int keybits)
 {
   if (!ctx) return;
@@ -59,5 +66,6 @@ const aria_impl_t aria_ref_impl = {
   aria_ref_init,
   aria_ref_encrypt,
   aria_ref_is_supported,
-  aria_ref_effective_path
+  aria_ref_effective_path,
+  aria_ref_execution_path
 };

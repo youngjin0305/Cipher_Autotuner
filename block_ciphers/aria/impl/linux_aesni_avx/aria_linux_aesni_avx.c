@@ -3,6 +3,7 @@
 #include "cpu_features.h"
 
 #include <assert.h>
+#include <string.h>
 
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #define ARIA_LINUX_AESNI_AVX_BUILDABLE 1
@@ -24,6 +25,17 @@ static const char *aria_linux_aesni_avx_effective_path(size_t len)
     return "linux_aesni_avx";
   }
   return "linux_aesni_avx_plus_ref_tail";
+}
+
+static void aria_linux_aesni_avx_execution_path(size_t len, aria_execution_path_t *path)
+{
+  size_t blocks;
+
+  if (!path) return;
+  memset(path, 0, sizeof(*path));
+  blocks = len / ARIA_BLOCK_SIZE;
+  path->avx_16way_chunk_count = blocks / ARIA_AESNI_PARALLEL_BLOCKS;
+  path->ref_tail_block_count = blocks % ARIA_AESNI_PARALLEL_BLOCKS;
 }
 
 static void aria_linux_aesni_avx_encrypt(const aria_ctx_t *ctx, const uint8_t *in, uint8_t *out, size_t len)
@@ -58,5 +70,6 @@ const aria_impl_t aria_linux_aesni_avx_impl = {
   aria_linux_aesni_init,
   aria_linux_aesni_avx_encrypt,
   aria_linux_aesni_avx_is_supported,
-  aria_linux_aesni_avx_effective_path
+  aria_linux_aesni_avx_effective_path,
+  aria_linux_aesni_avx_execution_path
 };

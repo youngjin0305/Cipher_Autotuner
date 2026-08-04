@@ -14,7 +14,7 @@
 
 typedef enum evaluation_mode {
   EVALUATION_DIRECT_REFERENCE = 0,
-  EVALUATION_BEST_STATIC = 1,
+  EVALUATION_BEST_FIXED = 1,
   EVALUATION_STATIC_HEURISTIC = 2,
   EVALUATION_AUTOTUNED_POLICY = 3,
   EVALUATION_MODE_COUNT = 4
@@ -65,8 +65,8 @@ static const char *evaluation_mode_name(evaluation_mode_t mode) {
   switch (mode) {
     case EVALUATION_DIRECT_REFERENCE:
       return "direct_reference";
-    case EVALUATION_BEST_STATIC:
-      return "best_static_implementation";
+    case EVALUATION_BEST_FIXED:
+      return "best_fixed_implementation";
     case EVALUATION_STATIC_HEURISTIC:
       return "static_heuristic_dispatch";
     case EVALUATION_AUTOTUNED_POLICY:
@@ -186,8 +186,8 @@ static int measure_direct_candidates(const aria_autotune_config_t *config,
   return out > 0;
 }
 
-static const aria_impl_t *select_best_static(direct_measurement_t *measurements,
-                                             size_t measurement_count) {
+static const aria_impl_t *select_best_fixed(direct_measurement_t *measurements,
+                                            size_t measurement_count) {
   const aria_impl_t *best = NULL;
   double best_macro_average = 0.0;
   size_t impl_index;
@@ -278,7 +278,7 @@ int aria_run_dispatch_evaluation(const aria_autotune_config_t *config,
                                  scenario_t scenario) {
   direct_measurement_t direct[EVALUATION_KEY_COUNT * EVALUATION_LENGTH_COUNT * EVALUATION_IMPL_COUNT] = {{0}};
   size_t direct_count = 0;
-  const aria_impl_t *best_static;
+  const aria_impl_t *best_fixed;
   evaluation_total_t totals[EVALUATION_MODE_COUNT] = {{0}};
   char detail_path[512];
   char summary_path[512];
@@ -296,8 +296,8 @@ int aria_run_dispatch_evaluation(const aria_autotune_config_t *config,
                                  stat_mode, direct, sizeof(direct) / sizeof(direct[0]), &direct_count)) {
     return 0;
   }
-  best_static = select_best_static(direct, direct_count);
-  if (!best_static) {
+  best_fixed = select_best_fixed(direct, direct_count);
+  if (!best_fixed) {
     return 0;
   }
 
@@ -312,7 +312,7 @@ int aria_run_dispatch_evaluation(const aria_autotune_config_t *config,
   fprintf(detail,
           "scenario,profile,dispatch_mode,key_bits,message_length,selected_implementation,policy_basis,warmup_iterations,inner_iterations,outer_samples_requested,outer_samples_valid,trim_ratio,trim_count_each_side,stat_mode,empty_loop_correction,trimmed_mean_ns_per_call,raw_mean_ns_per_call,median_ns_per_call,standard_deviation_ns_per_call,iqr_ns_per_call,trimmed_mean_ns_per_byte,throughput_bytes_per_sec,throughput_mib_per_sec,speedup_vs_direct_ref,dispatch_overhead_ns_per_call\n");
 
-  printf("\nDispatch Evaluation (Best Static=%s)\n", best_static->name);
+  printf("\nDispatch Evaluation (Best Fixed Implementation=%s)\n", best_fixed->name);
   for (key_index = 0; key_index < EVALUATION_KEY_COUNT; ++key_index) {
     const int key_bits = evaluation_key_bits_values[key_index];
     size_t length_index;
@@ -332,8 +332,8 @@ int aria_run_dispatch_evaluation(const aria_autotune_config_t *config,
       for (mode = EVALUATION_DIRECT_REFERENCE; mode < EVALUATION_MODE_COUNT; ++mode) {
         const aria_impl_t *selected = mode == EVALUATION_DIRECT_REFERENCE
                                           ? &aria_ref_impl
-                                          : mode == EVALUATION_BEST_STATIC
-                                                ? best_static
+                                          : mode == EVALUATION_BEST_FIXED
+                                                ? best_fixed
                                                 : mode == EVALUATION_STATIC_HEURISTIC
                                                       ? aria_runtime_dispatch_scenario(length, scenario)
                                                       : aria_autotuned_dispatch(key_bits, length);
@@ -351,7 +351,7 @@ int aria_run_dispatch_evaluation(const aria_autotune_config_t *config,
           fclose(summary);
           return 0;
         }
-        if (mode == EVALUATION_DIRECT_REFERENCE || mode == EVALUATION_BEST_STATIC) {
+        if (mode == EVALUATION_DIRECT_REFERENCE || mode == EVALUATION_BEST_FIXED) {
           stats = selected_direct->stats;
           inner_iterations = selected_direct->inner_iterations;
         } else if (!measure_dispatched(config, mode, selected, key_bits, length, input, output,

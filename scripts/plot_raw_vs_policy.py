@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 
 from plot_common import (
     IMPLEMENTATION_ORDER,
@@ -12,6 +13,8 @@ from plot_common import (
     filter_rows,
     filter_rows_by_length_range,
     load_summary_rows,
+    canonical_impl_from_effective_path,
+    load_csv_rows,
     impl_legend_handles,
     implementation_style,
     load_autotune_rows,
@@ -36,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Plot raw winner regions against the final stabilized autotune policy."
     )
     parser.add_argument("--summary", help="Path to summary_stats.csv")
+    parser.add_argument("--raw-best", help="Path to raw_best_by_length.csv")
     parser.add_argument("--coarse", help="Path to autotune_coarse.csv")
     parser.add_argument("--refined", help="Path to autotune_refined.csv")
     parser.add_argument("--policy", required=True, help="Path to autotune_policy.json or CSV")
@@ -90,9 +94,29 @@ def raw_winner_regions(rows: list[dict[str, str]]) -> list[tuple[float, float, s
         ]
         if not candidates:
             continue
-        winners.append((length, candidates[0]["impl"]))
+        winners.append(
+            (length, canonical_impl_from_effective_path(candidates[0]["effective_path"]))
+        )
     if not winners:
         raise SystemExit("error: no raw winner rows were found in the supplied autotune CSVs")
+    return merge_length_regions(winners)
+
+
+def raw_winner_regions_from_best_csv(
+    rows: list[dict[str, str]], key_bits: int
+) -> list[tuple[float, float, str]]:
+    """Build raw regions from the actual autotune winners and execution paths."""
+    winners = [
+        (
+            int(row["input_len"]),
+            canonical_impl_from_effective_path(row["raw_best_effective_path"]),
+        )
+        for row in rows
+        if int(row["key_bits"]) == key_bits
+    ]
+    winners.sort(key=lambda item: item[0])
+    if not winners:
+        raise SystemExit(f"error: no raw winner rows found for key_bits={key_bits}")
     return merge_length_regions(winners)
 
 
@@ -110,14 +134,21 @@ def raw_winner_regions_from_summary(
     for length in sorted({int(row["len"]) for row in key_rows}):
         candidates = [row for row in key_rows if int(row["len"]) == length]
         candidates.sort(key=lambda row: float(row[metric_column]))
-        winners.append((length, candidates[0]["impl"]))
+        winners.append(
+            (
+                length,
+                canonical_impl_from_effective_path(candidates[0]["effective_path"]),
+            )
+        )
 
     if not winners:
         raise SystemExit("error: no raw winner rows were found in summary_stats.csv")
     return merge_length_regions(winners)
 
 
-def plot_regions(ax, regions, *, title: str, hatch_mixed: bool = False) -> None:
+def plot_regions(
+    ax, regions, *, title: str, x_min: int, x_max: int, hatch_mixed: bool = False
+) -> None:
     """Render a single horizontal categorical region map."""
     x_values: list[int] = []
     for region in regions:
@@ -136,6 +167,10 @@ def plot_regions(ax, regions, *, title: str, hatch_mixed: bool = False) -> None:
         else:
             left, right, impl = region
             mixed = False
+        left = max(left, float(x_min))
+        right = min(right, float(x_max))
+        if right < left:
+            continue
         style = implementation_style(impl)
         patch = ax.axvspan(
             left,
@@ -150,20 +185,25 @@ def plot_regions(ax, regions, *, title: str, hatch_mixed: bool = False) -> None:
         )
         if hatch_mixed and mixed:
             patch.set_hatch("//")
-        ax.text(
-            (left * right) ** 0.5,
-            0.5,
-            region_label(impl),
-            ha="center",
-            va="center",
-            fontsize=9,
-            color=style["color"],
-            zorder=2,
-        )
+        # On the logarithmic x-axis, labels in later short SIMD-tail regions
+        # overlap even when each individual span can fit its own text. Keep
+        # those spans visible by color and label only sufficiently wide ones.
+        if right > left and math.log2(right / left) >= 0.45:
+            ax.text(
+                (left * right) ** 0.5,
+                0.5,
+                region_label(impl),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=style["color"],
+                zorder=2,
+            )
 
     ax.set_xscale("log", base=2)
     ax.set_xticks(tick_lengths)
     ax.set_xticklabels([str(length) for length in tick_lengths])
+    ax.set_xlim(x_min, x_max)
     ax.set_ylim(0.0, 1.0)
     ax.set_yticks([])
     ax.set_title(title)
@@ -188,7 +228,15 @@ def main() -> None:
         print(f"Refined input: {resolve_repo_path(args.refined)}")
     print(f"Figure output dir: {output_dir}")
 
-    if args.coarse and args.refined:
+    if args.raw_best:
+        _, best_rows = load_csv_rows(
+            resolve_repo_path(args.raw_best),
+            required_columns=[
+                "key_bits", "input_len", "raw_best_impl", "raw_best_effective_path"
+            ],
+        )
+        raw_regions = raw_winner_regions_from_best_csv(best_rows, args.key_bits)
+    elif args.coarse and args.refined:
         coarse_rows = load_autotune_rows(resolve_repo_path(args.coarse))
         refined_rows = load_autotune_rows(resolve_repo_path(args.refined))
         merged_rows = merge_autotune_rows(coarse_rows, refined_rows, args.key_bits)
@@ -204,7 +252,9 @@ def main() -> None:
         )
         raw_regions = raw_winner_regions_from_summary(summary_rows, args.key_bits)
     else:
-        raise SystemExit("error: provide either --summary or both --coarse and --refined")
+        raise SystemExit(
+            "error: provide --raw-best, --summary, or both --coarse and --refined"
+        )
 
     policy_group = None
     for group in policy_groups:
@@ -228,21 +278,39 @@ def main() -> None:
             }
         )
 
+    x_min = min(int(bucket["start_len"]) for bucket in policy_group["buckets"])
+    x_max = max(int(bucket["end_len"]) for bucket in policy_group["buckets"])
+    visible_impls = [
+        impl
+        for impl in IMPLEMENTATION_ORDER
+        if any(region[2] == impl for region in raw_regions)
+        or any(region["impl"] == impl for region in policy_regions)
+    ]
+
     configure_matplotlib()
-    fig, axes = plt.subplots(2, 1, figsize=(7.2, 3.6), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(7.2, 4.2), sharex=True)
     fig.patch.set_facecolor("white")
 
-    plot_regions(axes[0], raw_regions, title=f"Raw Winner Map ({args.key_bits}-bit key)")
+    plot_regions(
+        axes[0], raw_regions, title="Raw Winner Map",
+        x_min=x_min, x_max=x_max,
+    )
     plot_regions(
         axes[1],
         policy_regions,
-        title=f"Stabilized Policy Map ({args.key_bits}-bit key)",
+        title="Stabilized Policy Map",
+        x_min=x_min,
+        x_max=x_max,
         hatch_mixed=True,
     )
     axes[1].set_xlabel("Input length (bytes)")
-    axes[0].legend(handles=impl_legend_handles(), loc="upper center", ncol=4, frameon=False)
+    fig.suptitle(f"Raw Winner vs. Stabilized Policy ({args.key_bits}-bit key)", fontsize=13)
+    fig.legend(
+        handles=impl_legend_handles(visible_impls), loc="upper center",
+        bbox_to_anchor=(0.5, 0.90), ncol=len(visible_impls), frameon=False,
+    )
 
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.80))
     outputs = save_figure(fig, output_dir, f"fig_raw_vs_policy_key{args.key_bits}")
     plt.close(fig)
 

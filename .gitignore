@@ -1,6 +1,7 @@
 /build/
 /out/
 /figures/
+/_changes/
 /.codex/
 .codex
 *.exe

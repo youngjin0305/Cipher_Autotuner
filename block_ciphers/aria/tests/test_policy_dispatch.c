@@ -47,6 +47,24 @@ int main(void) {
       !expect(strcmp(aria_linux_gfni_avx512_impl.effective_path(528),
                      "linux_gfni_plus_ref_tail") == 0,
               "GFNI candidate must report a reference tail") ||
+      !expect(strcmp(aria_linux_aesni_avx2_impl.effective_path(240),
+                     "ref_fallback") == 0,
+              "AVX2 candidate below 16 blocks must report Ref fallback") ||
+      !expect(strcmp(aria_linux_aesni_avx2_impl.effective_path(256),
+                     "linux_aesni_avx") == 0,
+              "AVX2 candidate at 16 blocks must report AVX execution") ||
+      !expect(strcmp(aria_linux_aesni_avx2_impl.effective_path(272),
+                     "linux_aesni_avx_plus_ref_tail") == 0,
+              "AVX2 candidate at 17 blocks must report AVX plus Ref") ||
+      !expect(strcmp(aria_linux_aesni_avx2_impl.effective_path(512),
+                     "linux_aesni_avx2") == 0,
+              "AVX2 candidate at 32 blocks must report AVX2 execution") ||
+      !expect(strcmp(aria_linux_aesni_avx2_impl.effective_path(768),
+                     "linux_aesni_avx2_plus_avx_tail") == 0,
+              "AVX2 candidate at 48 blocks must report AVX2 plus AVX") ||
+      !expect(strcmp(aria_linux_aesni_avx2_impl.effective_path(784),
+                     "linux_aesni_avx2_plus_avx_ref_tail") == 0,
+              "AVX2 candidate at 49 blocks must report AVX2 plus AVX plus Ref") ||
       !expect((aria_runtime_dispatch(1024) == &aria_linux_gfni_avx512_impl) ==
                   gfni_supported,
               "static dispatch must select GFNI only when supported") ||

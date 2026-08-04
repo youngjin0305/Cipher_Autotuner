@@ -55,6 +55,83 @@ static int bytes_eq(const uint8_t *a, const uint8_t *b, size_t n) {
   return memcmp(a, b, n) == 0;
 }
 
+static int expect_path(const aria_impl_t *impl,
+                       size_t len,
+                       size_t expected_avx2,
+                       size_t expected_avx,
+                       size_t expected_ref) {
+  aria_execution_path_t path = {0, 0, 0, 0};
+
+  if (!impl || !impl->execution_path) {
+    printf("[FAIL] missing execution path metadata\n");
+    return -1;
+  }
+  impl->execution_path(len, &path);
+  if (path.avx2_32way_chunk_count != expected_avx2 ||
+      path.avx_16way_chunk_count != expected_avx ||
+      path.ref_tail_block_count != expected_ref) {
+    printf("[FAIL] %s path at %zu bytes: got avx2=%zu avx=%zu ref=%zu; expected %zu/%zu/%zu\n",
+           impl->name,
+           len,
+           path.avx2_32way_chunk_count,
+           path.avx_16way_chunk_count,
+           path.ref_tail_block_count,
+           expected_avx2,
+           expected_avx,
+           expected_ref);
+    return -1;
+  }
+  return 0;
+}
+
+static int run_dense_ref_comparison(const aria_impl_t *impl, int keybits) {
+  uint8_t key[32];
+  uint8_t input[4096];
+  uint8_t expected[4096];
+  uint8_t actual[4096];
+  aria_ctx_t ref_ctx;
+  aria_ctx_t impl_ctx;
+  size_t len;
+
+  if (!impl || !impl->init || !impl->encrypt) {
+    return -1;
+  }
+  if (impl->is_supported && !impl->is_supported()) {
+    printf("[SKIP] dense ref comparison (%s)\n", impl->name);
+    return 0;
+  }
+
+  for (len = 0; len < sizeof(key); ++len) {
+    key[len] = (uint8_t)(len * 13u + 7u);
+  }
+  for (len = 0; len < sizeof(input); ++len) {
+    input[len] = (uint8_t)(len * 29u + (len >> 3));
+  }
+  memset(&ref_ctx, 0, sizeof(ref_ctx));
+  memset(&impl_ctx, 0, sizeof(impl_ctx));
+  aria_ref_impl.init(&ref_ctx, key, keybits);
+  impl->init(&impl_ctx, key, keybits);
+
+  for (len = ARIA_BLOCK_SIZE; len <= sizeof(input); len += ARIA_BLOCK_SIZE) {
+    memset(expected, 0, len);
+    memset(actual, 0, len);
+    aria_ref_impl.encrypt(&ref_ctx, input, expected, len);
+    impl->encrypt(&impl_ctx, input, actual, len);
+    if (!bytes_eq(actual, expected, len)) {
+      printf("[FAIL] dense ref comparison key=%d impl=%s len=%zu\n",
+             keybits,
+             impl->name,
+             len);
+      return -1;
+    }
+  }
+
+  printf("[OK] dense ref comparison key=%d impl=%s lengths=16..4096\n",
+         keybits,
+         impl->name);
+  return 0;
+}
+
 static void dump_hex(const char *tag, const uint8_t *x, size_t n) {
   printf("%s", tag);
   for (size_t i = 0; i < n; i++) {
@@ -324,7 +401,27 @@ int main(void) {
     rc |= test_ecb_128_one(impls[i]);
     rc |= test_ecb_192_one(impls[i]);
     rc |= test_ecb_256_one(impls[i]);
+    rc |= run_dense_ref_comparison(impls[i], 128);
+    rc |= run_dense_ref_comparison(impls[i], 192);
+    rc |= run_dense_ref_comparison(impls[i], 256);
   }
+
+  rc |= expect_path(&aria_linux_aesni_avx_impl, 240, 0, 0, 15);
+  rc |= expect_path(&aria_linux_aesni_avx_impl, 256, 0, 1, 0);
+  rc |= expect_path(&aria_linux_aesni_avx_impl, 272, 0, 1, 1);
+
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 240, 0, 0, 15);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 256, 0, 1, 0);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 272, 0, 1, 1);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 496, 0, 1, 15);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 512, 1, 0, 0);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 528, 1, 0, 1);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 752, 1, 0, 15);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 768, 1, 1, 0);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 784, 1, 1, 1);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 1008, 1, 1, 15);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 1024, 2, 0, 0);
+  rc |= expect_path(&aria_linux_aesni_avx2_impl, 1040, 2, 0, 1);
 
   return rc ? 1 : 0;
 }

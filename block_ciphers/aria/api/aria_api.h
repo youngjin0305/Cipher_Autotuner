@@ -22,12 +22,22 @@ typedef void (*aria_encrypt_fn)(const aria_ctx_t *ctx, const uint8_t *in, uint8_
 typedef int (*aria_support_fn)(void);
 typedef const char *(*aria_effective_path_fn)(size_t len);
 
+typedef struct aria_execution_path {
+  size_t gfni_64way_chunk_count;
+  size_t avx2_32way_chunk_count;
+  size_t avx_16way_chunk_count;
+  size_t ref_tail_block_count;
+} aria_execution_path_t;
+
+typedef void (*aria_execution_path_fn)(size_t len, aria_execution_path_t *path);
+
 typedef struct aria_impl {
   const char *name;
   aria_init_fn init;
   aria_encrypt_fn encrypt;
   aria_support_fn is_supported;
   aria_effective_path_fn effective_path;
+  aria_execution_path_fn execution_path;
 } aria_impl_t;
 
 void aria_init(aria_ctx_t *ctx, const uint8_t *key, int keybits);

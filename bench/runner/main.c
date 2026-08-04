@@ -216,6 +216,60 @@ static const char *effective_path_for(const aria_impl_t *impl, size_t len) {
   return "unknown";
 }
 
+static aria_execution_path_t execution_path_for(const aria_impl_t *impl, size_t len) {
+  aria_execution_path_t path = {0, 0, 0, 0};
+
+  if (impl && impl->execution_path) {
+    impl->execution_path(len, &path);
+  }
+  return path;
+}
+
+static void format_execution_path(const aria_execution_path_t *path,
+                                  char *buffer,
+                                  size_t buffer_size) {
+  static const char *labels[] = {
+    "gfni_64way", "avx2_32way", "avx_16way", "ref"
+  };
+  size_t counts[4];
+  size_t used = 0;
+  size_t i;
+
+  if (!path || !buffer || buffer_size == 0) {
+    return;
+  }
+  counts[0] = path->gfni_64way_chunk_count;
+  counts[1] = path->avx2_32way_chunk_count;
+  counts[2] = path->avx_16way_chunk_count;
+  counts[3] = path->ref_tail_block_count;
+  buffer[0] = '\0';
+
+  for (i = 0; i < sizeof(counts) / sizeof(counts[0]); ++i) {
+    int written;
+    if (counts[i] == 0 || used >= buffer_size) {
+      continue;
+    }
+    written = snprintf(buffer + used,
+                       buffer_size - used,
+                       "%s%s*%zu",
+                       used == 0 ? "" : " + ",
+                       labels[i],
+                       counts[i]);
+    if (written < 0) {
+      buffer[0] = '\0';
+      return;
+    }
+    if ((size_t)written >= buffer_size - used) {
+      used = buffer_size - 1;
+      break;
+    }
+    used += (size_t)written;
+  }
+  if (used == 0) {
+    snprintf(buffer, buffer_size, "none");
+  }
+}
+
 static void write_raw_sample_row(FILE *raw_csv,
                                  const char *run_id,
                                  size_t len,
@@ -223,7 +277,9 @@ static void write_raw_sample_row(FILE *raw_csv,
                                  const char *scenario_name,
                                  size_t outer_idx,
                                  const bench_result_t *result,
-                                 const char *effective_path) {
+                                 const char *effective_path,
+                                 const aria_execution_path_t *execution_path,
+                                 const char *execution_path_text) {
   uint64_t total_ticks;
   uint64_t empty_ticks;
   uint64_t corrected_ticks;
@@ -232,7 +288,8 @@ static void write_raw_sample_row(FILE *raw_csv,
   double ns_per_call_corrected = 0.0;
   double ns_per_byte_corrected = 0.0;
 
-  if (!raw_csv || !run_id || !impl_name || !scenario_name || !result || !effective_path) {
+  if (!raw_csv || !run_id || !impl_name || !scenario_name || !result || !effective_path ||
+      !execution_path || !execution_path_text) {
     return;
   }
 
@@ -249,7 +306,7 @@ static void write_raw_sample_row(FILE *raw_csv,
     }
   }
 
-  fprintf(raw_csv, "%s,%zu,%s,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s\n",
+  fprintf(raw_csv, "%s,%zu,%s,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%zu,%zu,%zu,%zu,%s\n",
           run_id,
           len,
           impl_name,
@@ -264,7 +321,12 @@ static void write_raw_sample_row(FILE *raw_csv,
           ns_corrected,
           ns_per_call_corrected,
           ns_per_byte_corrected,
-          effective_path);
+          effective_path,
+          execution_path->gfni_64way_chunk_count,
+          execution_path->avx2_32way_chunk_count,
+          execution_path->avx_16way_chunk_count,
+          execution_path->ref_tail_block_count,
+          execution_path_text);
 }
 
 static void write_summary_row(FILE *summary_csv,
@@ -274,22 +336,30 @@ static void write_summary_row(FILE *summary_csv,
                               const char *impl_name,
                               const char *scenario_name,
                               const char *effective_path,
+                              const aria_execution_path_t *execution_path,
+                              const char *execution_path_text,
                               stat_mode_t stat_mode,
                               size_t warmup_count,
                               size_t outer_count,
                               int support_ok,
                               const bench_summary_stats_t *stats) {
-  if (!summary_csv || !run_id || !impl_name || !scenario_name || !effective_path || !stats) {
+  if (!summary_csv || !run_id || !impl_name || !scenario_name || !effective_path ||
+      !execution_path || !execution_path_text || !stats) {
     return;
   }
 
-  fprintf(summary_csv, "%s,%d,%zu,%s,%s,%s,%zu,%s,%.6f,%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%d\n",
+  fprintf(summary_csv, "%s,%d,%zu,%s,%s,%s,%zu,%zu,%zu,%zu,%s,%zu,%s,%.6f,%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%d\n",
           run_id,
           key_bits,
           len,
           impl_name,
           scenario_name,
           effective_path,
+          execution_path->gfni_64way_chunk_count,
+          execution_path->avx2_32way_chunk_count,
+          execution_path->avx_16way_chunk_count,
+          execution_path->ref_tail_block_count,
+          execution_path_text,
           stats->n_samples,
           bench_stat_mode_name(stat_mode),
           stats->trim_ratio,
@@ -432,6 +502,9 @@ static void write_run_meta(FILE *meta_json,
   fprintf(meta_json, "    \"linux_aesni_avx_plus_ref_tail\": \"%s\",\n",
           autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE ? "ref" : "linux_aesni_avx");
   fprintf(meta_json, "    \"linux_aesni_avx2_plus_ref_tail\": \"%s\",\n",
+          autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE ? "ref" : "linux_aesni_avx2");
+  fprintf(meta_json, "    \"linux_aesni_avx2_plus_avx_tail\": \"linux_aesni_avx2\",\n");
+  fprintf(meta_json, "    \"linux_aesni_avx2_plus_avx_ref_tail\": \"%s\",\n",
           autotune_config->tail_policy == ARIA_TAIL_POLICY_CONSERVATIVE ? "ref" : "linux_aesni_avx2");
   fprintf(meta_json, "    \"linux_gfni_avx_16way\": \"linux_gfni_avx512\",\n");
   fprintf(meta_json, "    \"linux_gfni_avx2_32way\": \"linux_gfni_avx512\",\n");
@@ -788,7 +861,7 @@ int main(int argc, char **argv) {
       free(output);
       return 1;
     }
-    fprintf(csv, "len,impl,effective_path,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,ns_per_byte,ns_per_byte_corrected,stat_mode,sink,scenario\n");
+    fprintf(csv, "len,impl,effective_path,gfni_64way_chunk_count,avx2_chunk_count,avx_chunk_count,ref_tail_block_count,execution_path,outer,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_per_call,ns_per_byte,ns_per_byte_corrected,stat_mode,sink,scenario\n");
   }
 
   if (should_emit_benchmark_output(autotune_config.output_level, BENCH_OUTPUT_RAW)) {
@@ -809,7 +882,7 @@ int main(int argc, char **argv) {
       free(output);
       return 1;
     }
-    fprintf(raw_csv, "run_id,len,impl,scenario,outer_idx,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_corrected,ns_per_call_corrected,ns_per_byte_corrected,effective_path\n");
+    fprintf(raw_csv, "run_id,len,impl,scenario,outer_idx,inner,total_ticks,empty_ticks,corrected_ticks,qpc_freq,ns_total,ns_corrected,ns_per_call_corrected,ns_per_byte_corrected,effective_path,gfni_64way_chunk_count,avx2_chunk_count,avx_chunk_count,ref_tail_block_count,execution_path\n");
   }
 
   if (should_emit_benchmark_output(autotune_config.output_level, BENCH_OUTPUT_SUMMARY)) {
@@ -832,7 +905,7 @@ int main(int argc, char **argv) {
       free(output);
       return 1;
     }
-    fprintf(summary_csv, "run_id,key_bits,len,impl,scenario,effective_path,valid_outer_samples,stat_mode,trim_ratio,trim_count_each_side,raw_mean_ns_per_call,trimmed_mean_ns_per_call,median_ns_per_call,standard_deviation_ns_per_call,iqr_ns_per_call,min_ns_per_call,max_ns_per_call,raw_mean_ns_per_byte,trimmed_mean_ns_per_byte,warmup_iterations,outer_samples_requested,support_ok\n");
+    fprintf(summary_csv, "run_id,key_bits,len,impl,scenario,effective_path,gfni_64way_chunk_count,avx2_chunk_count,avx_chunk_count,ref_tail_block_count,execution_path,valid_outer_samples,stat_mode,trim_ratio,trim_count_each_side,raw_mean_ns_per_call,trimmed_mean_ns_per_call,median_ns_per_call,standard_deviation_ns_per_call,iqr_ns_per_call,min_ns_per_call,max_ns_per_call,raw_mean_ns_per_byte,trimmed_mean_ns_per_byte,warmup_iterations,outer_samples_requested,support_ok\n");
   }
 
   if (!build_benchmark_output_path(meta_json_path, sizeof(meta_json_path), &autotune_config, "run_meta.json")) {
@@ -930,7 +1003,10 @@ int main(int argc, char **argv) {
       for (size_t i = 0; i < lengths_count; ++i) {
         const size_t len = lengths[i];
         const char *effective_path = effective_path_for(impl, len);
+        const aria_execution_path_t execution_path = execution_path_for(impl, len);
+        char execution_path_text[160];
         const char *scenario_name = aria_scenario_name(scenario);
+        format_execution_path(&execution_path, execution_path_text, sizeof(execution_path_text));
         bench_result_t result = bench_run(impl->encrypt,
                                           &ctx,
                                           input,
@@ -947,10 +1023,15 @@ int main(int argc, char **argv) {
         final_sink ^= result.sink;
 
         if (csv) {
-          fprintf(csv, "%zu,%s,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu,%s\n",
+          fprintf(csv, "%zu,%s,%s,%zu,%zu,%zu,%zu,%s,%zu,%zu,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%s,%llu,%s\n",
                   len,
                   impl->name,
                   effective_path,
+                  execution_path.gfni_64way_chunk_count,
+                  execution_path.avx2_32way_chunk_count,
+                  execution_path.avx_16way_chunk_count,
+                  execution_path.ref_tail_block_count,
+                  execution_path_text,
                   result.outer,
                   result.inner,
                   (unsigned long long)result.total_ticks,
@@ -967,7 +1048,16 @@ int main(int argc, char **argv) {
         }
 
         for (size_t sample_idx = 0; sample_idx < result.samples.count; ++sample_idx) {
-          write_raw_sample_row(raw_csv, run_id, len, impl->name, scenario_name, sample_idx, &result, effective_path);
+          write_raw_sample_row(raw_csv,
+                               run_id,
+                               len,
+                               impl->name,
+                               scenario_name,
+                               sample_idx,
+                               &result,
+                               effective_path,
+                               &execution_path,
+                               execution_path_text);
         }
         write_summary_row(summary_csv,
                           run_id,
@@ -976,6 +1066,8 @@ int main(int argc, char **argv) {
                           impl->name,
                           scenario_name,
                           effective_path,
+                          &execution_path,
+                          execution_path_text,
                           result.stat_mode,
                           warmup,
                           outer,

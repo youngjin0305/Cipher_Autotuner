@@ -1,7 +1,19 @@
 #include "cpu_features.h"
 
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
+
+typedef struct aria_x86_feature_cache {
+  int aesni;
+  int avx;
+  int avx2;
+  int gfni_avx512;
+} aria_x86_feature_cache_t;
+
+static aria_x86_feature_cache_t aria_cached_features;
+/* 0: uninitialized, 1: initialization in progress, 2: ready. */
+static atomic_int aria_feature_cache_state = ATOMIC_VAR_INIT(0);
 
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #include <intrin.h>
@@ -85,54 +97,50 @@ static int aria_x86_get_features(int *aesni, int *avx, int *avx2, int *gfni_avx5
   return (have_aesni || have_avx || have_avx2 || have_gfni_avx512) ? 1 : 0;
 }
 
+static const aria_x86_feature_cache_t *aria_cpu_features_cached(void)
+{
+  int state = atomic_load_explicit(&aria_feature_cache_state, memory_order_acquire);
+
+  if (state != 2) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&aria_feature_cache_state,
+                                                &expected,
+                                                1,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire)) {
+      aria_x86_get_features(&aria_cached_features.aesni,
+                            &aria_cached_features.avx,
+                            &aria_cached_features.avx2,
+                            &aria_cached_features.gfni_avx512);
+      atomic_store_explicit(&aria_feature_cache_state, 2, memory_order_release);
+    } else {
+      while (atomic_load_explicit(&aria_feature_cache_state,
+                                  memory_order_acquire) != 2) {
+        /* Feature detection is short and occurs only once per process. */
+      }
+    }
+  }
+  return &aria_cached_features;
+}
+
 int aria_cpu_has_aesni_avx(void)
 {
-  int aesni = 0;
-  int avx = 0;
-  int avx2 = 0;
-  int gfni_avx512 = 0;
-
-  aria_x86_get_features(&aesni, &avx, &avx2, &gfni_avx512);
-  (void)avx2;
-  (void)gfni_avx512;
-  return (aesni && avx) ? 1 : 0;
+  const aria_x86_feature_cache_t *features = aria_cpu_features_cached();
+  return (features->aesni && features->avx) ? 1 : 0;
 }
 
 int aria_cpu_has_avx2(void)
 {
-  int aesni = 0;
-  int avx = 0;
-  int avx2 = 0;
-  int gfni_avx512 = 0;
-
-  aria_x86_get_features(&aesni, &avx, &avx2, &gfni_avx512);
-  (void)aesni;
-  (void)gfni_avx512;
-  return avx2 ? 1 : 0;
+  return aria_cpu_features_cached()->avx2 ? 1 : 0;
 }
 
 int aria_cpu_has_aesni_avx2(void)
 {
-  int aesni = 0;
-  int avx = 0;
-  int avx2 = 0;
-  int gfni_avx512 = 0;
-
-  aria_x86_get_features(&aesni, &avx, &avx2, &gfni_avx512);
-  (void)gfni_avx512;
-  return (aesni && avx && avx2) ? 1 : 0;
+  const aria_x86_feature_cache_t *features = aria_cpu_features_cached();
+  return (features->aesni && features->avx && features->avx2) ? 1 : 0;
 }
 
 int aria_cpu_has_gfni_avx512(void)
 {
-  int aesni = 0;
-  int avx = 0;
-  int avx2 = 0;
-  int gfni_avx512 = 0;
-
-  aria_x86_get_features(&aesni, &avx, &avx2, &gfni_avx512);
-  (void)aesni;
-  (void)avx;
-  (void)avx2;
-  return gfni_avx512 ? 1 : 0;
+  return aria_cpu_features_cached()->gfni_avx512 ? 1 : 0;
 }

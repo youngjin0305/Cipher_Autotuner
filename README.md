@@ -13,8 +13,12 @@
 
 CPU feature detection 결과 지원되지 않는 SIMD 구현은 측정과 Policy 후보에서 제외된다. GFNI
 후보는 AVX2, AVX-512F, AVX-512VL, GFNI와 OS의 XMM/YMM/ZMM context 지원을 모두 확인한다.
+CPUID/XGETBV 검출 결과는 프로세스 최초 요청에서 한 번만 계산해 cache하며, runtime dispatch의
+timed hot path에서는 cache된 feature flag를 사용한다.
 Auto-tuning은 기존 Coarse Scan으로 성능 전환 후보를 찾고, winner가 바뀌는 구간만 Fine Scan으로
-재측정한다. 이 프로젝트에는 히스테리시스, 비용 모델, model-guided tuning, 머신러닝 또는 새로운
+재측정한다. Coarse grid는 log backbone과 함께 256/512/1024-byte SIMD 구조 단위의 모든 배수와
+±16-byte 인접 지점을 설정된 전체 길이 범위에서 포함하므로 반복되는 tail 전환을 놓치지 않는다.
+이 프로젝트에는 히스테리시스, 비용 모델, model-guided tuning, 머신러닝 또는 새로운
 탐색 알고리즘이 포함되지 않는다.
 
 공통 측정과 통계는 `bench_core`, Policy 품질 지표는 `policy_metrics`, ARIA 후보 등록과 실제
@@ -27,6 +31,11 @@ batch보다 작은 block tail만 `ref`로 이어진다. 원본 kernel glue 파�
 빌드하지 않는다. GFNI를 실제 실행할 수 없는 CPU에서도 프로젝트와 나머지 후보는 정상
 빌드·실행되고, 해당 후보는 `run_meta.json`에 `unsupported_cpu_feature`로 기록된다.
 
+AES-NI adapter도 Linux ECB glue의 mixed-width 순서를 재현한다. `linux_aesni_avx`는 16-way
+청크를 반복한 뒤 1~15블록만 Ref로 처리한다. `linux_aesni_avx2`는 32-way 청크를 반복하고,
+remainder가 16블록 이상이면 AVX 16-way를 한 번 실행한 뒤 최종 1~15블록만 Ref로 처리한다.
+따라서 AVX2 후보의 실제 순서는 `AVX2 32-way → AVX 16-way → Ref 1-way`이다.
+
 ## Build and Run
 
 Release build와 테스트:
@@ -37,7 +46,10 @@ cmake --build build --config Release
 ctest --test-dir build --output-on-failure
 ```
 
-`aria_kat`는 GFNI 후보에 대해 16/17, 32/33, 64/65-block 입력을 128/192/256-bit key로 검증한다.
+`aria_kat`는 모든 구현을 Ref와 비교하여 128/192/256-bit key 및 16~4096 bytes의 모든
+16-byte 정렬 길이를 검증한다. 또한 AVX2의 240/256/272, 496/512/528, 752/768/784,
+1008/1024/1040-byte 경계에서 32-way/16-way/Ref chunk 구성을 검사한다. GFNI 후보에 대해서는
+16/17, 32/33, 64/65-block 입력도 별도로 검증한다.
 GFNI/AVX-512를 사용할 수 없는 CPU에서는 이 항목만 `SKIP`되고 전체 테스트는 실패하지 않는다.
 GFNI 지원 실험 머신에서는 해당 항목이 모두 `[OK]`인지 확인한 뒤 `full` profile을 실행한다.
 
@@ -92,7 +104,7 @@ bash scripts/run_autotune_and_plot.sh full out/autotune_full
 
 ## Measurement Methodology
 
-모든 성능 비교, winner 결정, throughput, speedup, Best Static 선택과 독립 Policy 검증은 같은
+모든 성능 비교, winner 결정, throughput, speedup, Best Fixed Implementation 선택과 독립 Policy 검증은 같은
 `trimmed_mean_ns_per_call` estimator를 사용한다.
 
 각 `(mode, key_bits, message_length, implementation)` 측정 지점의 처리 순서는 다음과 같다.
@@ -132,12 +144,13 @@ standard deviation, IQR, min/max는 진단 목적으로만 기록하며 winner�
 `ref` 구현을 Policy lookup 없이 직접 호출한다. key setup은 timed region 전에 수행하며,
 프레임워크 lookup overhead가 없는 기준점이다.
 
-### Best Static Implementation
+### Best Fixed Implementation
 
 CPU가 지원하는 각 후보 구현을 전체 평가 grid에서 직접 측정한다. 각 후보의 지점별
 `trimmed_mean_ns_per_call`을 동일 가중치로 macro-average하고, 가장 낮은 단일 구현을 모든
 길이에 고정한다. 이 비교 대상은 단순히 빠른 SIMD 구현 하나를 고정한 효과와 길이별 Policy
-선택 효과를 구분한다. lookup은 포함하지 않는다.
+선택 효과를 구분한다. 여기서 `Best`는 **단일 고정 구현 후보 중 가장 좋다**는 뜻이며, 길이마다
+전체 후보를 탐색해 구성한 Oracle/이론상 최적 Policy를 의미하지 않는다. lookup은 포함하지 않는다.
 
 ### Static Heuristic Dispatch
 
@@ -171,7 +184,7 @@ Policy 생성이 끝난 뒤 별도의 exhaustive pass에서 모든 16-byte 지�
 현재 구현은 Oracle winner와 후보별 시간으로 Auto-tuned Policy의 regret와 accuracy를 계산하지만,
 Oracle Policy Dispatch 자체의 실행시간 막대는 생성하지 않는다. 런타임에는 하나의 active Policy
 Map만 설치되므로 평가 도중 이를 Oracle Map으로 교체하면 Auto-tuned Policy 평가 상태를 오염시킬
-수 있기 때문이다. 따라서 `fig_framework_evaluation.png`의 실행 성능 패널에는 Oracle 막대를
+수 있기 때문이다. 따라서 `fig_framework_performance.png`의 실행 성능 패널에는 Oracle 막대를
 명시적으로 생략한다.
 
 ## Metrics
@@ -209,8 +222,9 @@ speedup_vs_direct_ref = direct_ref_trimmed_mean_ns_per_call /
 exact_policy_match_accuracy_percent = exact_match_points / validation_point_count × 100
 ```
 
-`normalized` basis에서는 `ref_fallback`을 `ref` class로 합치고, `plus_ref_tail`은 `tail_policy`에
-따라 분류한다. GFNI 16/32/64-way와 이들의 혼합 경로는 하나의 `linux_gfni_avx512` class로
+`normalized` basis에서는 `ref_fallback`을 `ref` class로 합치고, Ref tail이 포함된 경로는
+`tail_policy`에 따라 분류한다. AVX2 후보가 32-way 없이 AVX 16-way만 실행하면 AVX class로,
+`AVX2 + AVX` mixed-width 경로는 AVX2 class로 정규화한다. GFNI 16/32/64-way와 이들의 혼합 경로는 하나의 `linux_gfni_avx512` class로
 정규화한다. GFNI bulk 뒤에 `ref` tail이 남는 경우 `native`에서는 GFNI class,
 `conservative`에서는 `ref` class로 분류한다. `raw` basis에서는 후보 구현 이름을 그대로
 비교한다. 높을수록 좋다.
@@ -313,11 +327,12 @@ Policy 품질은 다음 순서로 해석한다.
 |---|---|
 | `dispatch_evaluation.csv` | mode/key/길이별 trimmed mean, throughput, speedup, lookup overhead 및 진단 통계 |
 | `dispatch_evaluation_summary.csv` | mode별 macro-average, geometric-mean speedup과 overhead |
-| `policy_validation.csv` | 독립 exhaustive winner, Policy 시간, regret, 허용 오차 정확도와 후보별 시간 |
+| `policy_validation.csv` | 독립 exhaustive winner, Policy 시간, regret, 후보별 시간 및 AVX2 mixed-width chunk 구성 |
 | `policy_validation_summary.csv` | key별 행과 `all` 전체 행의 accuracy, regret, boundary와 mismatch 요약 |
 | `autotune_metrics.csv` | search/end-to-end 시간, 측정 건수와 reduction |
 | `framework_validation_summary.csv` | CPU 호환성, 범위, 정렬, fallback과 key별 Policy 생성 Pass/Fail |
 | `autotune_policy.csv`, `autotune_policy.json` | 설치된 최종 Policy bucket |
+| `autotune_scan_points.csv` | Coarse/Fine Scan에서 실제 측정한 key size와 입력 길이 |
 | `summary_stats.csv` | 구현별 대표 성능 지형과 진단 통계 |
 | `run_meta.json` | 실행 환경과 재현성 설정 |
 
@@ -331,25 +346,57 @@ CSV 스키마에서 대표 시간 명칭은 `trimmed_mean_ns_per_call`, 여러 �
 
 ## Figures
 
-통합 스크립트는 PNG만 생성하며 중복을 피하기 위해 세 파일만 남긴다.
+통합 스크립트는 PNG만 생성하며 다음 여섯 파일만 남긴다.
 
 ```text
 fig_perf_key128_ns_byte.png
 fig_raw_vs_policy_key128.png
-fig_framework_evaluation.png
+fig_policy_comparison_key128.png
+fig_scan_coverage.png
+fig_framework_performance.png
+fig_policy_validation.png
 ```
 
-`fig_framework_evaluation.png`에는 다음이 포함된다.
+`fig_framework_performance.png`에는 다음이 포함된다.
 
 - Macro-averaged Trimmed-Mean Execution Time
 - Geometric-Mean Speedup over Direct Reference
+
+`fig_policy_validation.png`에는 다음이 포함된다.
+
 - Exact Policy Match와 Within-1% Accuracy
 - Mean/Maximum Policy Regret
 - Mean Symmetric Boundary Distance
 - search/end-to-end tuning time, 후보 측정 건수, measurement reduction과 mismatched ranges
 
-Figure 제목은 scenario, profile, trim ratio와 end-to-end Policy 생성 시간을 기록한다. Throughput은
-길이별 성능 Figure 및 CSV와 중복되므로 최종 요약 Figure에서는 speedup으로 교체했다.
+`fig_policy_comparison_key128.png`는 동일한 입력 길이 범위에서 다음 세 dispatch 정책의 구현 선택
+구간을 비교한다.
+
+- **Best Fixed Implementation**: 평가 범위 전체에 하나의 구현만 고정했을 때 macro-average
+  실행시간이 가장 낮은 구현. 길이별 Oracle Policy가 아니다.
+- **Static Heuristic**: CPU feature와 고정 길이 경계(256/512/1024 bytes)를 사용하는 기존 Runtime Dispatch
+- **Auto-tuned Policy**: Coarse/Fine Scan으로 생성하여 설치한 최종 Policy Map
+
+`fig_scan_coverage.png`는 128/192/256-bit key별로 Coarse Scan과 Fine Scan에서 실제 측정한 입력
+길이를 표시한다. 따라서 Fine Scan이 전체 범위를 재탐색한 것이 아니라 Coarse Scan에서 발견한 전환
+후보 주변만 세밀하게 측정했는지 확인할 수 있다.
+
+`fig_raw_vs_policy_key128.png`의 Raw Winner는 후보 등록 이름이 아니라 실제 `effective_path`를 기준으로
+표시한다. AVX/AVX2 후보가 작은 입력에서 `ref_fallback`을 실행했다면 `Ref`로 정규화하며, 현재 실험에
+사용되지 않은 구현은 범례에서 제외한다. Policy와 그림의 유효 범위는 ARIA 최소 블록 길이인 16
+bytes부터 시작하므로 16 bytes 미만은 평가·Policy 대상이 아니다.
+
+`fig_perf_key128_ns_byte.png`는 `summary_stats.csv`의 11개 대표 길이가 아니라 exhaustive
+`policy_validation.csv`의 16-byte 간격 측정값을 사용한다. AVX는 256-byte 단위 처리 뒤 최종
+1~15블록을 Ref로 처리한다. AVX2는 512-byte 단위 처리 뒤 256-byte remainder를 AVX로 흡수하고
+최종 1~15블록만 Ref로 처리한다. 따라서 수정 후에도 작은 256-byte 주기의 tail sawtooth는 남지만,
+16~31블록 remainder 전체를 Ref로 넘길 때 발생하던 큰 512-byte 주기 절벽과 AVX/AVX2 winner
+교대는 나타나지 않아야 한다.
+
+Figure를 실행 성능과 Policy 검증으로 분리하여 축, 범례와 주석이 겹치지 않도록 했다. 제목은
+scenario, profile과 trim ratio를 기록하며 Policy 검증 Figure에는 end-to-end Policy 생성 시간도
+기록한다. Throughput은 길이별 성능 Figure 및 CSV와 중복되므로 성능 요약 Figure에서는 speedup으로
+교체했다. 기존 `fig_framework_evaluation.png`는 더 이상 생성하지 않는다.
 
 개별 생성:
 
